@@ -697,6 +697,73 @@ def render_key_messages(result, news_brief: dict | None) -> int:
     return len(msgs)
 
 
+_THRESHOLD_EXPLAINER = """
+**점수 → 표현 매핑**
+
+모든 신호 점수와 최종 종합 점수는 **−1.0 ~ +1.0** 범위.
+
+| 표현 | 점수 범위 | 의미 |
+|---|---|---|
+| **강한 매수** | `≥ +0.30` | 매우 강한 상승 압력 |
+| **매수 우호** | `+0.15 ~ +0.30` | **최종 LONG 판정 임계** |
+| 약 매수 쪽 | `+0.05 ~ +0.15` | 약한 매수 편향 |
+| 기다리기 | `−0.05 ~ +0.05` | 사실상 균형 |
+| 약 매도 쪽 | `−0.15 ~ −0.05` | 약한 매도 편향 |
+| **매도 우호** | `−0.30 ~ −0.15` | **최종 SHORT 판정 임계** |
+| **강한 매도** | `≤ −0.30` | 매우 강한 하락 압력 |
+
+---
+
+**최종 판정 규칙** (`decision.py`)
+
+- **LONG**: 종합 점수 `≥ +0.15` **AND** 신뢰도 `≥ 0.25`
+- **SHORT**: 종합 점수 `≤ −0.15` **AND** 신뢰도 `≥ 0.25`
+- **NEUTRAL**: 위 둘 다 아닐 때 (또는 신뢰도 `< 0.25`이면 강제 NEUTRAL)
+
+---
+
+**왜 이 숫자들인가**
+
+- **±0.15 (verdict 임계)**: 신호들의 가중 평균이 작아도 한 방향으로 15% 이상
+  쏠려야 행동에 가치가 있음. 더 작으면 노이즈, 더 크면 너무 보수적이라 기회 놓침.
+- **±0.30 (강한 신호)**: 임계의 2배. 단일 약한 신호로는 도달 불가 — 여러 강한
+  신호가 한 방향으로 정렬돼야 나오는 수치.
+- **신뢰도 0.25 (최소 컷)**: 최소 하나의 고신뢰 신호 또는 여러 중간 신뢰 신호의 합.
+  이 미만이면 데이터가 부족해 점수 자체가 의미 없으므로 강제 NEUTRAL.
+
+---
+
+**시각 indicator 임계** (신호 분포 박스의 `▲▲ ▲ · ▼ ▼▼` 마커)
+
+| 마커 | 점수 / 신뢰도 |
+|---|---|
+| `—` | 신뢰도 `< 0.15` (비활성) |
+| `▲▲` | 점수 `≥ +0.30` |
+| `▲` | 점수 `+0.10 ~ +0.30` |
+| `·` | 점수 `−0.10 ~ +0.10` |
+| `▼` | 점수 `−0.30 ~ −0.10` |
+| `▼▼` | 점수 `≤ −0.30` |
+
+표현 매핑(7단계)과 시각 indicator(5단계)가 다른 이유 — 텍스트 라벨은 더 세밀한
+구분이 필요하고, 시각 마커는 한눈에 잡히게 단순화.
+
+---
+
+**수정하려면**
+
+- `decision.py` — `LONG_THRESHOLD` / `SHORT_THRESHOLD` / `MIN_CONFIDENCE`
+- `streamlit_app.py` — `_score_phrase()` / `_score_indicator()`
+"""
+
+
+def render_threshold_guide() -> None:
+    """Popover explaining score buckets, verdict thresholds, and confidence gate."""
+    cols = st.columns([1, 4])
+    with cols[0]:
+        with st.popover("점수와 임계 기준", use_container_width=True):
+            st.markdown(_THRESHOLD_EXPLAINER)
+
+
 def _render_section_conclusion(text: str) -> None:
     """Subtle green-bordered box with a clean 'Summary' label."""
     st.markdown(
@@ -1240,6 +1307,7 @@ def main() -> None:
 
     render_verdict_block(decision, inputs["perp_mark"], inputs["spot_price"])
     render_plain_summary(decision, result)
+    render_threshold_guide()
     render_timeframes(multi)
     render_action_guide(multi)
 
