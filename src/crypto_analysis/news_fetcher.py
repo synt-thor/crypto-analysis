@@ -46,7 +46,16 @@ KEYWORD_WHITELIST: tuple[str, ...] = (
     "yield", "treasury", "recession", "inflation",
 )
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+# Try newer models first, fall back to older if not available on the user's tier.
+# As of 2026, Google has rotated through several names; pinning a list survives churn.
+MODEL_FALLBACK_CHAIN: tuple[str, ...] = (
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-001",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+)
+DEFAULT_MODEL = MODEL_FALLBACK_CHAIN[0]
 
 
 # ─── 1. Fetch ────────────────────────────────────────────────────────────────
@@ -136,57 +145,91 @@ _SYSTEM_INSTRUCTION = (
 def score_with_gemini(
     headlines: list[dict[str, Any]],
     api_key: str,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     window_hours: int = 24,
-) -> dict[str, Any] | None:
-    """Single-batch JSON-mode call (google-genai SDK). Returns brief dict or None."""
+) -> dict[str, Any]:
+    """Single-batch JSON-mode call (google-genai SDK).
+
+    Always returns a dict. On failure the dict has a `_error` key
+    describing the exact failure reason; on success it has `events`.
+    """
     if not headlines:
         return {"window_hours": window_hours, "events": [], "macro_calendar": []}
 
     try:
         from google import genai
         from google.genai import types as genai_types
-    except ImportError:
-        logger.warning("google-genai not installed; skipping live scoring")
-        return None
+    except ImportError as e:
+        return {"events": [], "macro_calendar": [],
+                "_error": f"google-genai 패키지 import 실패: {e}"}
+
+    # Numbered, source-tagged headline list keeps prompt compact.
+    lines = []
+    for i, h in enumerate(headlines, start=1):
+        lines.append(
+            f"{i}. [{h['source']}] {h['title']}"
+            + (f" — {h['summary'][:120]}" if h.get("summary") else "")
+        )
+    user_prompt = (
+        f"Recent headlines (last {window_hours}h, UTC):\n\n"
+        + "\n".join(lines)
+        + "\n\nReturn the JSON brief now."
+    )
 
     try:
         client = genai.Client(api_key=api_key)
+    except Exception as e:
+        return {"events": [], "macro_calendar": [],
+                "_error": f"Gemini 클라이언트 생성 실패: {type(e).__name__}: {e}"}
 
-        # Numbered, source-tagged headline list keeps prompt compact.
-        lines = []
-        for i, h in enumerate(headlines, start=1):
-            lines.append(
-                f"{i}. [{h['source']}] {h['title']}"
-                + (f" — {h['summary'][:120]}" if h.get("summary") else "")
+    config = genai_types.GenerateContentConfig(
+        system_instruction=_SYSTEM_INSTRUCTION,
+        response_mime_type="application/json",
+        temperature=0.2,
+    )
+
+    # Try the preferred model, fall back through the chain on model-specific
+    # failures (404 NOT_FOUND, "model not supported", etc.).
+    candidates: tuple[str, ...] = (
+        (model,) if model else MODEL_FALLBACK_CHAIN
+    )
+    last_error: str | None = None
+    for candidate in candidates:
+        try:
+            response = client.models.generate_content(
+                model=candidate, contents=user_prompt, config=config,
             )
-        user_prompt = (
-            f"Recent headlines (last {window_hours}h, UTC):\n\n"
-            + "\n".join(lines)
-            + "\n\nReturn the JSON brief now."
-        )
+        except Exception as e:
+            err_str = f"{type(e).__name__}: {e}"
+            last_error = f"[{candidate}] {err_str}"
+            # Only retry next model on availability errors. Auth / quota errors
+            # are global and won't be helped by trying other models.
+            lower = err_str.lower()
+            if any(tok in lower for tok in ("not found", "not supported", "404", "unavailable")):
+                logger.info("Model %s unavailable, trying next: %s", candidate, err_str)
+                continue
+            return {"events": [], "macro_calendar": [], "_error": last_error,
+                    "_model_tried": candidate}
 
-        response = client.models.generate_content(
-            model=model,
-            contents=user_prompt,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=_SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                temperature=0.2,
-            ),
-        )
         text = (getattr(response, "text", None) or "").strip()
         if not text:
-            logger.warning("Gemini returned empty response")
-            return None
-        parsed = json.loads(text)
-    except Exception as e:
-        logger.exception("Gemini scoring failed: %s", e)
-        return None
+            last_error = f"[{candidate}] empty response (안전 필터 가능성)"
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as e:
+            last_error = f"[{candidate}] JSON 파싱 실패: {e}; raw[:200]={text[:200]!r}"
+            continue
+        # Success path: jump out of fallback loop with a model attribution.
+        parsed["_model"] = candidate
+        break
+    else:
+        return {"events": [], "macro_calendar": [],
+                "_error": f"모든 모델 후보 실패. last={last_error}"}
 
     if not isinstance(parsed, dict) or "events" not in parsed:
-        logger.warning("Gemini response missing 'events' key")
-        return None
+        return {"events": [], "macro_calendar": [],
+                "_error": f"Gemini 응답에 'events' 키 없음: {str(parsed)[:200]}"}
 
     # Sanitise + clamp.
     events = []
@@ -210,6 +253,7 @@ def score_with_gemini(
         "window_hours": window_hours,
         "generated_at_utc": datetime.now(tz=timezone.utc).isoformat(),
         "source": "live_gemini",
+        "model": parsed.get("_model", "unknown"),
         "events": events,
         "macro_calendar": [str(c)[:120] for c in (parsed.get("macro_calendar") or [])][:10],
     }
@@ -254,32 +298,18 @@ def build_news_brief(
             ),
         }
 
-    # Try Gemini scoring; on failure return diagnostic stub.
-    try:
-        from google import genai  # noqa: F401
-    except ImportError:
-        return {
-            "events": [],
-            "macro_calendar": [],
-            "_diagnostic": (
-                "google-genai 패키지가 설치되지 않음. Streamlit Cloud에서 "
-                "Manage app → Reboot app 으로 venv 재구성 필요."
-            ),
-        }
-
     scored = score_with_gemini(relevant, api_key=api_key, window_hours=window_hours)
-    if scored is None:
+    if "_error" in scored:
         return {
             "events": [],
             "macro_calendar": [],
             "_diagnostic": (
-                f"Gemini 호출 실패 (입력 헤드라인 {len(relevant)}건). "
-                "키 유효성·할당량·일시 장애 가능. 콘솔 로그 확인."
+                f"Gemini 호출 실패 (입력 {len(relevant)}건): {scored['_error']}"
             ),
         }
     if not scored.get("events"):
         scored["_diagnostic"] = (
-            f"Gemini 호출 성공했으나 events 0개 — 입력 {len(relevant)}건이 "
-            "모두 노이즈로 분류됐거나 모델 응답 파싱 문제."
+            f"Gemini 응답에 events 0개 — 입력 {len(relevant)}건이 "
+            "모두 노이즈로 분류됐거나 모델 응답 파싱 이슈."
         )
     return scored
