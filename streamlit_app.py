@@ -6,6 +6,15 @@ Run locally: `streamlit run streamlit_app.py`
 
 from __future__ import annotations
 
+# Ensure local src/ is importable FIRST, ahead of any stale pip-installed copy.
+# Streamlit Cloud reuses its venv across deploys, which can pin an older
+# crypto_analysis package. Prepending src/ guarantees the freshest source wins.
+import sys
+from pathlib import Path as _Path
+_SRC = _Path(__file__).resolve().parent / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
