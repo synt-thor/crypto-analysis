@@ -123,6 +123,75 @@ NEWS_BRIEF_PATH = Path(__file__).parent / "data" / "news_brief.json"
 
 VERDICT_COLORS = {"LONG": "#22c55e", "SHORT": "#ef4444", "NEUTRAL": "#9ca3af"}
 
+# Plain-language signal names for beginner-friendly summaries.
+SIGNAL_NAME_KR: dict[str, str] = {
+    "macro": "거시 환경(주식·달러)",
+    "option_skew": "옵션 헷지 수요",
+    "iv_skew": "변동성 안도/공포",
+    "basis": "선물 베이시스",
+    "orderbook": "오더북 매수벽",
+    "news": "뉴스 흐름",
+    "gex": "옵션 포지셔닝",
+    "onchain": "비트코인 네트워크",
+    "spot_futures": "현물-선물 괴리",
+    "funding": "펀딩(롱/숏 균형)",
+    "oi": "미결제약정 변화",
+    "liquidations": "청산 흐름",
+}
+
+# Group signals by what they measure for the "한눈에" overview.
+SIGNAL_CATEGORIES: dict[str, list[str]] = {
+    "📊 시장 분위기": ["macro", "news", "onchain"],
+    "💱 트레이더 베팅": ["funding", "oi", "gex", "option_skew", "iv_skew", "liquidations"],
+    "📈 가격 압력": ["orderbook", "spot_futures", "basis"],
+}
+
+AUDIENCE_FOR_TF: dict[str, str] = {
+    "ST": "👤 데이트레이더 (수 시간)",
+    "MT": "👤 스윙 트레이더 (며칠)",
+    "LT": "👤 장기 투자자 (수 주~)",
+}
+
+
+def _score_emoji(score: float, confidence: float = 1.0) -> str:
+    """Compact emoji indicating bias direction + strength."""
+    if confidence < 0.15:
+        return "⚪"
+    if score >= 0.30:
+        return "🚀"
+    if score >= 0.10:
+        return "✅"
+    if score >= -0.10:
+        return "⚖️"
+    if score >= -0.30:
+        return "❌"
+    return "🔻"
+
+
+def _score_phrase(score: float) -> str:
+    if score >= 0.30:
+        return "강한 매수"
+    if score >= 0.15:
+        return "매수 우호"
+    if score >= 0.05:
+        return "약 매수 쪽"
+    if score >= -0.05:
+        return "기다리기"
+    if score >= -0.15:
+        return "약 매도 쪽"
+    if score >= -0.30:
+        return "매도 우호"
+    return "강한 매도"
+
+
+def _tf_advice(verdict: str, score: float) -> str:
+    """One-line plain advice for a timeframe verdict + score."""
+    if verdict == "LONG":
+        return "분할 매수 또는 보유" if score >= 0.20 else "관망 후 눌림 매수 후보"
+    if verdict == "SHORT":
+        return "헷지 또는 단기 숏 검토" if score <= -0.20 else "포지션 축소 검토"
+    return "방향 베팅 자제"
+
 # Detailed tooltips for each signal's weight slider — explains what the signal
 # measures, its data source, and how its score maps to LONG/SHORT bias.
 SIGNAL_HELP: dict[str, str] = {
@@ -426,8 +495,9 @@ def render_verdict_block(decision, perp_mark: float, spot_price: float) -> None:
 def render_timeframes(multi) -> None:
     st.subheader("타임프레임별 판정")
     cols = st.columns(3)
-    for col, label, dec, res in zip(
+    for col, tf_key, label, dec, res in zip(
         cols,
+        ["ST", "MT", "LT"],
         ["ST  (수 시간)", "MT  (수 일)", "LT  (수 주)"],
         [multi.st, multi.mt, multi.lt],
         [multi.st_result, multi.mt_result, multi.lt_result],
@@ -445,6 +515,11 @@ def render_timeframes(multi) -> None:
                     <div style="font-size:13px; opacity:0.85;">
                         score <b>{dec.score:+.3f}</b> · conf <b>{dec.confidence:.2f}</b>
                     </div>
+                    <div style="font-size:12px; opacity:0.75; margin-top:6px;
+                                border-top:1px solid #ffffff22; padding-top:6px;">
+                        {AUDIENCE_FOR_TF[tf_key]}<br>
+                        💡 <b>{_tf_advice(dec.verdict, dec.score)}</b>
+                    </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -452,9 +527,186 @@ def render_timeframes(multi) -> None:
             top3 = res.contributions[:3]
             for c in top3:
                 arrow = "▲" if c["contribution"] > 0 else ("▼" if c["contribution"] < 0 else "•")
+                kr_name = SIGNAL_NAME_KR.get(c["name"], c["name"])
                 st.caption(
-                    f"{arrow} **{c['name']}** {c['contribution']:+.3f}  ·  {c['rationale'][:80]}"
+                    f"{arrow} **{kr_name}** {c['contribution']:+.3f}  ·  {c['rationale'][:70]}"
                 )
+
+
+def render_plain_summary(decision, result) -> None:
+    """1-line plain interpretation under the verdict block."""
+    contribs = result.contributions
+    if not contribs:
+        return
+    pos = [c for c in contribs if c["contribution"] > 0]
+    neg = [c for c in contribs if c["contribution"] < 0]
+    top_pos = max(pos, key=lambda c: c["contribution"], default=None)
+    top_neg = min(neg, key=lambda c: c["contribution"], default=None)
+
+    parts = []
+    if top_pos:
+        parts.append(f"**{SIGNAL_NAME_KR.get(top_pos['name'], top_pos['name'])}**가 매수 쪽으로 가장 크게 기여")
+    if top_neg:
+        parts.append(f"**{SIGNAL_NAME_KR.get(top_neg['name'], top_neg['name'])}**가 매도 쪽으로 가장 크게 누름")
+
+    verdict_phrase = {
+        "LONG":    "→ **매수 쪽이 우세**",
+        "SHORT":   "→ **매도 쪽이 우세**",
+        "NEUTRAL": "→ **두 힘이 비슷해 명확한 방향 없음**",
+    }[decision.verdict]
+
+    summary = " · ".join(parts) + f" {verdict_phrase}"
+
+    st.markdown(
+        f"""<div style="background:#1e3a5f33; border-left:3px solid #60a5fa;
+        padding:10px 14px; margin:8px 0; border-radius:4px;">
+        💬 <b>한줄 해석</b> &nbsp; {summary}
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_action_guide(multi) -> None:
+    """3-row TF-aware action recommendation box."""
+    rows = []
+    for tf_key, label, dec in [
+        ("LT", "📅 장기 (수 주~)", multi.lt),
+        ("MT", "📅 중기 (며칠)",   multi.mt),
+        ("ST", "📅 단기 (수 시간)", multi.st),
+    ]:
+        color = VERDICT_COLORS[dec.verdict]
+        advice = _tf_advice(dec.verdict, dec.score)
+        rows.append(
+            f"""<tr>
+                <td style="padding:6px 10px; white-space:nowrap;">{label}</td>
+                <td style="padding:6px 10px; color:{color}; font-weight:600;">{dec.verdict}</td>
+                <td style="padding:6px 10px;">{advice}</td>
+            </tr>"""
+        )
+
+    st.markdown(
+        f"""<div style="background:#0f172a55; border:1px solid #ffffff22;
+        border-radius:8px; padding:14px; margin:12px 0;">
+        <div style="font-size:14px; font-weight:600; margin-bottom:6px;">
+            💡 오늘의 행동 가이드
+        </div>
+        <table style="width:100%; font-size:13px; border-collapse:collapse;">
+            {''.join(rows)}
+        </table>
+        <div style="font-size:11px; opacity:0.7; margin-top:10px;
+                    padding-top:8px; border-top:1px solid #ffffff15;">
+            ⚠️ 신호는 확률입니다. 강한 신호도 30% 이상 틀립니다. 손절선 미리 정하고,
+            잃어도 되는 돈으로만 거래하세요. 한 신호에 풀 사이즈 진입 금지.
+        </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_key_messages(result, news_brief: dict | None) -> None:
+    """Dynamic regime/event insights — only show ones that apply right now."""
+    contribs = {c["name"]: c for c in result.contributions}
+    msgs: list[tuple[str, str]] = []  # (icon, text)
+
+    # 1) Macro vs option skew divergence (very common in current regime).
+    macro = contribs.get("macro")
+    skew = contribs.get("option_skew")
+    if macro and skew and macro["score"] > 0.3 and skew["score"] < -0.3:
+        msgs.append((
+            "⚔️",
+            "**거시 vs 옵션 충돌**: 매크로(주식·달러)는 매수 우호인데 옵션 시장은 "
+            "하락 보호에 비싸게 베팅 중. 거시 호재가 가격에 이미 반영됐을 가능성, "
+            "또는 트레이더의 헷지가 과해서 풀리면 추가 상승 연료.",
+        ))
+
+    # 2) Complacency warning (IV << RV).
+    iv = contribs.get("iv_skew")
+    if iv and iv["score"] < -0.5:
+        msgs.append((
+            "⚠️",
+            "**콤플레이선시 경고**: 옵션 시장이 미래 변동성을 실제 변동성보다 "
+            "훨씬 낮게 가격에 반영. 시장이 과하게 안도하고 있어 변동성 폭발 위험. "
+            "역사적으로 이런 구간 직후 큰 가격 급변이 자주 발생.",
+        ))
+
+    # 3) Funding extreme (rare but worth flagging).
+    funding = contribs.get("funding")
+    if funding and abs(funding["score"]) > 0.4:
+        side = "롱 과열" if funding["score"] < 0 else "숏 과열"
+        msgs.append((
+            "🔥",
+            f"**펀딩 극단치**: {side} 상태. 역추세 압력 누적 중 — 청산 캐스케이드 가능.",
+        ))
+
+    # 4) Macro calendar event imminent (from news_brief).
+    if news_brief and news_brief.get("macro_calendar"):
+        cal = news_brief["macro_calendar"][:3]
+        if cal:
+            msgs.append((
+                "📅",
+                f"**임박 이벤트**: {' · '.join(cal)}. 결과에 따라 점수가 급변할 수 있음.",
+            ))
+
+    # 5) Liquidation flow extreme.
+    liq = contribs.get("liquidations")
+    if liq and abs(liq["score"]) > 0.3:
+        side = "롱 청산 우세 (단기 바닥 가능)" if liq["score"] > 0 else "숏 청산 우세 (스퀴즈 고점 가능)"
+        msgs.append(("💥", f"**청산 플로우**: {side}."))
+
+    if not msgs:
+        return  # nothing notable — keep page clean
+
+    items_html = "".join(
+        f'<li style="margin:6px 0;">{icon} {text}</li>' for icon, text in msgs
+    )
+    st.markdown(
+        f"""<div style="background:#1e293b66; border:1px solid #ffffff22;
+        border-radius:8px; padding:14px; margin:12px 0;">
+        <div style="font-size:14px; font-weight:600; margin-bottom:6px;">
+            🔍 시장의 핵심 메시지
+        </div>
+        <ul style="margin:0; padding-left:18px; font-size:13px;">
+            {items_html}
+        </ul>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_signal_categories(result) -> None:
+    """3-category overview of all 12 signals using emoji ✅⚠️❌⚖️⚪."""
+    by_name = {c["name"]: c for c in result.contributions}
+
+    rows_html = []
+    for cat_label, sig_names in SIGNAL_CATEGORIES.items():
+        items = []
+        for name in sig_names:
+            c = by_name.get(name)
+            if c is None:
+                continue
+            emoji = _score_emoji(c["score"], c["confidence"])
+            kr = SIGNAL_NAME_KR.get(name, name)
+            phrase = _score_phrase(c["score"])
+            items.append(f"{emoji} <b>{kr}</b> <span style='opacity:0.65;'>({phrase})</span>")
+        body = "  ·  ".join(items) if items else "<span style='opacity:0.5;'>데이터 없음</span>"
+        rows_html.append(
+            f'<div style="margin:6px 0; font-size:13px;"><b>{cat_label}</b>'
+            f'<br><span style="margin-left:18px;">{body}</span></div>'
+        )
+
+    st.markdown(
+        f"""<div style="background:#0f172a55; border:1px solid #ffffff22;
+        border-radius:8px; padding:14px; margin:12px 0;">
+        <div style="font-size:14px; font-weight:600; margin-bottom:8px;">
+            🗂 신호 한눈에
+        </div>
+        {''.join(rows_html)}
+        <div style="font-size:11px; opacity:0.6; margin-top:10px;">
+            ✅ 매수 우호  ·  ❌ 매도 우호  ·  ⚖️ 균형  ·  🚀/🔻 강한 신호  ·  ⚪ 비활성
+        </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 
 
 def render_signal_table(result) -> None:
@@ -725,8 +977,13 @@ def main() -> None:
     multi = decide_multi(signals)
 
     render_verdict_block(decision, inputs["perp_mark"], inputs["spot_price"])
+    render_plain_summary(decision, result)
     render_timeframes(multi)
-    render_signal_table(result)
+    render_action_guide(multi)
+    render_key_messages(result, news_brief)
+    render_signal_categories(result)
+    with st.expander("🎓 12개 신호 자세한 데이터 보기", expanded=False):
+        render_signal_table(result)
     render_backtest()
     render_footer()
 
