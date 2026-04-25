@@ -140,33 +140,33 @@ SIGNAL_NAME_KR: dict[str, str] = {
     "liquidations": "청산 흐름",
 }
 
-# Group signals by what they measure for the "한눈에" overview.
+# Group signals by what they measure for the overview.
 SIGNAL_CATEGORIES: dict[str, list[str]] = {
-    "📊 시장 분위기": ["macro", "news", "onchain"],
-    "💱 트레이더 베팅": ["funding", "oi", "gex", "option_skew", "iv_skew", "liquidations"],
-    "📈 가격 압력": ["orderbook", "spot_futures", "basis"],
+    "시장 분위기": ["macro", "news", "onchain"],
+    "트레이더 베팅": ["funding", "oi", "gex", "option_skew", "iv_skew", "liquidations"],
+    "가격 압력": ["orderbook", "spot_futures", "basis"],
 }
 
 AUDIENCE_FOR_TF: dict[str, str] = {
-    "ST": "👤 데이트레이더 (수 시간)",
-    "MT": "👤 스윙 트레이더 (며칠)",
-    "LT": "👤 장기 투자자 (수 주~)",
+    "ST": "데이트레이더 · 수 시간",
+    "MT": "스윙 트레이더 · 며칠",
+    "LT": "장기 투자자 · 수 주~",
 }
 
 
-def _score_emoji(score: float, confidence: float = 1.0) -> str:
-    """Compact emoji indicating bias direction + strength."""
+def _score_indicator(score: float, confidence: float = 1.0) -> tuple[str, str]:
+    """Returns (compact_label, css_color) for a bias indicator without emoji."""
     if confidence < 0.15:
-        return "⚪"
+        return ("—", "#6b7280")  # inactive / dim
     if score >= 0.30:
-        return "🚀"
+        return ("▲▲", "#22c55e")
     if score >= 0.10:
-        return "✅"
+        return ("▲", "#22c55e")
     if score >= -0.10:
-        return "⚖️"
+        return ("·", "#9ca3af")
     if score >= -0.30:
-        return "❌"
-    return "🔻"
+        return ("▼", "#ef4444")
+    return ("▼▼", "#ef4444")
 
 
 def _score_phrase(score: float) -> str:
@@ -369,7 +369,7 @@ def _get_gemini_api_key() -> str | None:
     return os.getenv("GEMINI_API_KEY")
 
 
-@st.cache_data(ttl=900, show_spinner="📰 실시간 뉴스 페치 + Gemini 점수화…")
+@st.cache_data(ttl=900, show_spinner="실시간 뉴스 페치 + Gemini 점수화…")
 def fetch_live_news_brief() -> dict | None:
     """Returns auto-built news brief or None to fall back to disk baseline."""
     api_key = _get_gemini_api_key()
@@ -453,7 +453,7 @@ def render_header(fetched_at: datetime) -> None:
             f"(KST {kst:%H:%M:%S})"
         )
     with btn_col:
-        if st.button("🔄 Refresh", use_container_width=True):
+        if st.button("Refresh", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
@@ -516,10 +516,14 @@ def render_timeframes(multi) -> None:
                     <div style="font-size:13px; opacity:0.85;">
                         score <b>{dec.score:+.3f}</b> · conf <b>{dec.confidence:.2f}</b>
                     </div>
-                    <div style="font-size:12px; opacity:0.75; margin-top:6px;
-                                border-top:1px solid #ffffff22; padding-top:6px;">
-                        {AUDIENCE_FOR_TF[tf_key]}<br>
-                        💡 <b>{_tf_advice(dec.verdict, dec.score)}</b>
+                    <div style="font-size:11px; opacity:0.7; margin-top:8px;
+                                border-top:1px solid #ffffff22; padding-top:8px;
+                                letter-spacing:0.3px;">
+                        {AUDIENCE_FOR_TF[tf_key]}
+                    </div>
+                    <div style="font-size:13px; margin-top:6px; font-weight:600;
+                                color:{color};">
+                        {_tf_advice(dec.verdict, dec.score)}
                     </div>
                 </div>
                 """,
@@ -527,10 +531,21 @@ def render_timeframes(multi) -> None:
             )
             top3 = res.contributions[:3]
             for c in top3:
-                arrow = "▲" if c["contribution"] > 0 else ("▼" if c["contribution"] < 0 else "•")
+                if c["contribution"] > 0:
+                    arrow, arrow_color = "▲", "#22c55e"
+                elif c["contribution"] < 0:
+                    arrow, arrow_color = "▼", "#ef4444"
+                else:
+                    arrow, arrow_color = "·", "#9ca3af"
                 kr_name = SIGNAL_NAME_KR.get(c["name"], c["name"])
-                st.caption(
-                    f"{arrow} **{kr_name}** {c['contribution']:+.3f}  ·  {c['rationale'][:70]}"
+                st.markdown(
+                    f'<div style="font-size:12px; opacity:0.85; margin:4px 0;">'
+                    f'<span style="color:{arrow_color}; font-weight:600;">{arrow}</span> '
+                    f'<b>{kr_name}</b> '
+                    f'<span style="opacity:0.7;">{c["contribution"]:+.3f}</span>'
+                    f' · <span style="opacity:0.65;">{c["rationale"][:70]}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
                 )
 
 
@@ -559,9 +574,11 @@ def render_plain_summary(decision, result) -> None:
     summary = " · ".join(parts) + f" {verdict_phrase}"
 
     st.markdown(
-        f"""<div style="background:#1e3a5f33; border-left:3px solid #60a5fa;
-        padding:10px 14px; margin:8px 0; border-radius:4px;">
-        💬 <b>한줄 해석</b> &nbsp; {summary}
+        f"""<div style="background:#1e3a5f1f; border-left:2px solid #60a5fa;
+        padding:12px 16px; margin:10px 0; border-radius:2px;">
+        <div style="font-size:10px; letter-spacing:1.5px; text-transform:uppercase;
+                    opacity:0.6; margin-bottom:4px;">한줄 해석</div>
+        <div style="font-size:14px; line-height:1.6;">{summary}</div>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -571,32 +588,36 @@ def render_action_guide(multi) -> None:
     """3-row TF-aware action recommendation box."""
     rows = []
     for tf_key, label, dec in [
-        ("LT", "📅 장기 (수 주~)", multi.lt),
-        ("MT", "📅 중기 (며칠)",   multi.mt),
-        ("ST", "📅 단기 (수 시간)", multi.st),
+        ("LT", "장기 · 수 주~", multi.lt),
+        ("MT", "중기 · 며칠",   multi.mt),
+        ("ST", "단기 · 수 시간", multi.st),
     ]:
         color = VERDICT_COLORS[dec.verdict]
         advice = _tf_advice(dec.verdict, dec.score)
         rows.append(
             f"""<tr>
-                <td style="padding:6px 10px; white-space:nowrap;">{label}</td>
-                <td style="padding:6px 10px; color:{color}; font-weight:600;">{dec.verdict}</td>
-                <td style="padding:6px 10px;">{advice}</td>
+                <td style="padding:8px 10px; white-space:nowrap; opacity:0.75;
+                           font-size:12px; letter-spacing:0.3px;">{label}</td>
+                <td style="padding:8px 10px; color:{color}; font-weight:600;
+                           letter-spacing:0.5px;">{dec.verdict}</td>
+                <td style="padding:8px 10px;">{advice}</td>
             </tr>"""
         )
 
     st.markdown(
-        f"""<div style="background:#0f172a55; border:1px solid #ffffff22;
-        border-radius:8px; padding:14px; margin:12px 0;">
-        <div style="font-size:14px; font-weight:600; margin-bottom:6px;">
-            💡 오늘의 행동 가이드
+        f"""<div style="background:#0f172a55; border:1px solid #ffffff1a;
+        border-radius:8px; padding:18px 20px; margin:12px 0;">
+        <div style="font-size:14px; font-weight:600; margin-bottom:10px;
+                    letter-spacing:0.3px;">
+            오늘의 행동 가이드
         </div>
         <table style="width:100%; font-size:13px; border-collapse:collapse;">
             {''.join(rows)}
         </table>
-        <div style="font-size:11px; opacity:0.7; margin-top:10px;
-                    padding-top:8px; border-top:1px solid #ffffff15;">
-            ⚠️ 신호는 확률입니다. 강한 신호도 30% 이상 틀립니다. 손절선 미리 정하고,
+        <div style="font-size:11px; opacity:0.6; margin-top:14px;
+                    padding-top:10px; border-top:1px solid #ffffff10;
+                    font-style:italic;">
+            신호는 확률입니다. 강한 신호도 30% 이상 틀립니다. 손절선 미리 정하고,
             잃어도 되는 돈으로만 거래하세요. 한 신호에 풀 사이즈 진입 금지.
         </div>
         </div>""",
@@ -611,66 +632,63 @@ def render_key_messages(result, news_brief: dict | None) -> int:
     conclusion box).
     """
     contribs = {c["name"]: c for c in result.contributions}
-    msgs: list[tuple[str, str]] = []  # (icon, text)
+    msgs: list[str] = []
 
     # 1) Macro vs option skew divergence (very common in current regime).
     macro = contribs.get("macro")
     skew = contribs.get("option_skew")
     if macro and skew and macro["score"] > 0.3 and skew["score"] < -0.3:
-        msgs.append((
-            "⚔️",
-            "**거시 vs 옵션 충돌**: 매크로(주식·달러)는 매수 우호인데 옵션 시장은 "
+        msgs.append(
+            "**거시 vs 옵션 충돌** — 매크로(주식·달러)는 매수 우호인데 옵션 시장은 "
             "하락 보호에 비싸게 베팅 중. 거시 호재가 가격에 이미 반영됐을 가능성, "
-            "또는 트레이더의 헷지가 과해서 풀리면 추가 상승 연료.",
-        ))
+            "또는 트레이더의 헷지가 과해서 풀리면 추가 상승 연료."
+        )
 
     # 2) Complacency warning (IV << RV).
     iv = contribs.get("iv_skew")
     if iv and iv["score"] < -0.5:
-        msgs.append((
-            "⚠️",
-            "**콤플레이선시 경고**: 옵션 시장이 미래 변동성을 실제 변동성보다 "
+        msgs.append(
+            "**콤플레이선시 경고** — 옵션 시장이 미래 변동성을 실제 변동성보다 "
             "훨씬 낮게 가격에 반영. 시장이 과하게 안도하고 있어 변동성 폭발 위험. "
-            "역사적으로 이런 구간 직후 큰 가격 급변이 자주 발생.",
-        ))
+            "역사적으로 이런 구간 직후 큰 가격 급변이 자주 발생."
+        )
 
     # 3) Funding extreme (rare but worth flagging).
     funding = contribs.get("funding")
     if funding and abs(funding["score"]) > 0.4:
         side = "롱 과열" if funding["score"] < 0 else "숏 과열"
-        msgs.append((
-            "🔥",
-            f"**펀딩 극단치**: {side} 상태. 역추세 압력 누적 중 — 청산 캐스케이드 가능.",
-        ))
+        msgs.append(
+            f"**펀딩 극단치** — {side} 상태. 역추세 압력 누적 중 · 청산 캐스케이드 가능."
+        )
 
     # 4) Macro calendar event imminent (from news_brief).
     if news_brief and news_brief.get("macro_calendar"):
         cal = news_brief["macro_calendar"][:3]
         if cal:
-            msgs.append((
-                "📅",
-                f"**임박 이벤트**: {' · '.join(cal)}. 결과에 따라 점수가 급변할 수 있음.",
-            ))
+            msgs.append(
+                f"**임박 이벤트** — {' · '.join(cal)}. 결과에 따라 점수가 급변할 수 있음."
+            )
 
     # 5) Liquidation flow extreme.
     liq = contribs.get("liquidations")
     if liq and abs(liq["score"]) > 0.3:
         side = "롱 청산 우세 (단기 바닥 가능)" if liq["score"] > 0 else "숏 청산 우세 (스퀴즈 고점 가능)"
-        msgs.append(("💥", f"**청산 플로우**: {side}."))
+        msgs.append(f"**청산 플로우** — {side}.")
 
     if not msgs:
         return 0  # nothing notable — keep page clean
 
     items_html = "".join(
-        f'<li style="margin:6px 0;">{icon} {text}</li>' for icon, text in msgs
+        f'<li style="margin:8px 0; padding-left:4px;">{text}</li>' for text in msgs
     )
     st.markdown(
-        f"""<div style="background:#1e293b66; border:1px solid #ffffff22;
-        border-radius:8px; padding:14px; margin:12px 0;">
-        <div style="font-size:14px; font-weight:600; margin-bottom:6px;">
-            🔍 시장의 핵심 메시지
+        f"""<div style="background:#1e293b3d; border:1px solid #ffffff1a;
+        border-radius:8px; padding:18px 20px; margin:12px 0;">
+        <div style="font-size:14px; font-weight:600; margin-bottom:10px;
+                    letter-spacing:0.3px;">
+            시장의 핵심 메시지
         </div>
-        <ul style="margin:0; padding-left:18px; font-size:13px;">
+        <ul style="margin:0; padding-left:18px; font-size:13px; line-height:1.7;">
             {items_html}
         </ul>
         </div>""",
@@ -680,11 +698,14 @@ def render_key_messages(result, news_brief: dict | None) -> int:
 
 
 def _render_section_conclusion(text: str) -> None:
-    """Small green box: '👉 한 마디로: ...'"""
+    """Subtle green-bordered box with a clean 'Summary' label."""
     st.markdown(
-        f"""<div style="background:#22c55e15; border-left:3px solid #22c55e;
-        padding:8px 14px; margin:4px 0 18px 0; border-radius:4px; font-size:13px;">
-        👉 <b>한 마디로</b>: {text}
+        f"""<div style="background:#22c55e0d; border-left:2px solid #22c55e;
+        padding:10px 16px; margin:6px 0 20px 0; border-radius:2px; font-size:13px;
+        line-height:1.6;">
+        <span style="font-size:10px; letter-spacing:1.5px; text-transform:uppercase;
+                     opacity:0.65; margin-right:10px;">정리</span>
+        {text}
         </div>""",
         unsafe_allow_html=True,
     )
@@ -734,25 +755,31 @@ def render_easy_summary(decision, multi, news_brief: dict | None) -> None:
     cal_line = ""
     if news_brief and news_brief.get("macro_calendar"):
         first = news_brief["macro_calendar"][0]
-        cal_line = f"<br>📅 <b>{first}</b> 결과 후 다시 점검하세요."
+        cal_line = (
+            f'<div style="margin-top:10px; padding-top:8px; '
+            f'border-top:1px solid #ffffff10; font-size:13px; opacity:0.85;">'
+            f'예정 이벤트 — <b>{first}</b> 결과 후 다시 점검하세요.</div>'
+        )
 
     st.markdown(
-        f"""<div style="background: linear-gradient(135deg, #1e3a5f33, #0f172a44);
-        border:2px solid #60a5fa88; border-radius:12px;
-        padding:18px 22px; margin:8px 0 14px 0;">
-            <div style="font-size:15px; font-weight:700; margin-bottom:10px;">
-                📝 가장 쉬운 결론
+        f"""<div style="background: linear-gradient(135deg, #1e3a5f1f, #0f172a33);
+        border:1px solid #60a5fa55; border-radius:8px;
+        padding:22px 26px; margin:10px 0 18px 0;">
+            <div style="font-size:11px; letter-spacing:2px; text-transform:uppercase;
+                        opacity:0.65; margin-bottom:12px;">
+                오늘의 결론
             </div>
-            <div style="font-size:14px; line-height:1.7;">
+            <div style="font-size:15px; line-height:1.85;">
                 {head}<br>
-                · {st_line}<br>
-                · {mt_line}<br>
-                · {lt_line}
-                {cal_line}
+                <span style="opacity:0.85;">· {st_line}</span><br>
+                <span style="opacity:0.85;">· {mt_line}</span><br>
+                <span style="opacity:0.85;">· {lt_line}</span>
             </div>
-            <div style="font-size:11px; opacity:0.7; margin-top:10px;
-                        padding-top:8px; border-top:1px solid #ffffff15;">
-                ⚠️ 신호는 확률입니다. <b>잃어도 되는 돈으로만</b> 거래하시고,
+            {cal_line}
+            <div style="font-size:11px; opacity:0.55; margin-top:14px;
+                        padding-top:10px; border-top:1px solid #ffffff10;
+                        font-style:italic;">
+                신호는 확률입니다. <b>잃어도 되는 돈으로만</b> 거래하시고,
                 손절선을 미리 정하세요. 한 신호에 풀 사이즈 진입 금지.
             </div>
         </div>""",
@@ -811,7 +838,7 @@ def _conclude_signal_table_text(result) -> str:
 
 
 def render_signal_categories(result) -> None:
-    """3-category overview of all 12 signals using emoji ✅⚠️❌⚖️⚪."""
+    """3-category overview of all 12 signals — typography only, no emoji."""
     by_name = {c["name"]: c for c in result.contributions}
 
     rows_html = []
@@ -821,25 +848,44 @@ def render_signal_categories(result) -> None:
             c = by_name.get(name)
             if c is None:
                 continue
-            emoji = _score_emoji(c["score"], c["confidence"])
+            indicator, color = _score_indicator(c["score"], c["confidence"])
             kr = SIGNAL_NAME_KR.get(name, name)
             phrase = _score_phrase(c["score"])
-            items.append(f"{emoji} <b>{kr}</b> <span style='opacity:0.65;'>({phrase})</span>")
-        body = "  ·  ".join(items) if items else "<span style='opacity:0.5;'>데이터 없음</span>"
+            items.append(
+                f'<span style="display:inline-block; margin:2px 0;">'
+                f'<span style="color:{color}; font-weight:600; '
+                f'display:inline-block; min-width:24px;">{indicator}</span>'
+                f'<span style="margin-left:6px;">{kr}</span> '
+                f'<span style="color:{color}; opacity:0.85;">— {phrase}</span>'
+                f'</span>'
+            )
+        body = "<br>".join(items) if items else (
+            '<span style="opacity:0.5;">데이터 없음</span>'
+        )
         rows_html.append(
-            f'<div style="margin:6px 0; font-size:13px;"><b>{cat_label}</b>'
-            f'<br><span style="margin-left:18px;">{body}</span></div>'
+            f'<div style="margin:14px 0;">'
+            f'<div style="font-size:11px; letter-spacing:1.5px; '
+            f'text-transform:uppercase; opacity:0.6; margin-bottom:6px;">{cat_label}</div>'
+            f'<div style="font-size:13px; padding-left:2px;">{body}</div>'
+            f'</div>'
         )
 
     st.markdown(
-        f"""<div style="background:#0f172a55; border:1px solid #ffffff22;
-        border-radius:8px; padding:14px; margin:12px 0;">
-        <div style="font-size:14px; font-weight:600; margin-bottom:8px;">
-            🗂 신호 한눈에
+        f"""<div style="background:#0f172a55; border:1px solid #ffffff1a;
+        border-radius:8px; padding:18px 20px; margin:12px 0;">
+        <div style="font-size:14px; font-weight:600; margin-bottom:6px;
+                    letter-spacing:0.3px;">
+            신호 분포
         </div>
         {''.join(rows_html)}
-        <div style="font-size:11px; opacity:0.6; margin-top:10px;">
-            ✅ 매수 우호  ·  ❌ 매도 우호  ·  ⚖️ 균형  ·  🚀/🔻 강한 신호  ·  ⚪ 비활성
+        <div style="font-size:11px; opacity:0.55; margin-top:14px;
+                    padding-top:10px; border-top:1px solid #ffffff10;">
+            <span style="color:#22c55e;">▲▲</span> 강한 매수 ·
+            <span style="color:#22c55e;">▲</span> 매수 우호 ·
+            <span style="color:#9ca3af;">·</span> 균형 ·
+            <span style="color:#ef4444;">▼</span> 매도 우호 ·
+            <span style="color:#ef4444;">▼▼</span> 강한 매도 ·
+            <span style="color:#6b7280;">—</span> 비활성
         </div>
         </div>""",
         unsafe_allow_html=True,
@@ -913,19 +959,19 @@ def render_news_editor() -> dict | None:
         except Exception:
             ts_label = "방금"
         badge_color = "#ef4444"
-        badge_text = f"🔴 LIVE  ·  {n_events} events  ·  {ts_label} 갱신"
+        badge_text = f"LIVE  ·  {n_events} events  ·  {ts_label} 갱신"
     elif live_brief is not None and "_diagnostic" in live_brief:
         # Pipeline ran but no usable events — show why.
         badge_color = "#f59e0b"
-        badge_text = "⚠️ LIVE 페치 부분 실패 — 디스크 baseline 사용"
+        badge_text = "LIVE 페치 부분 실패 — Baseline 사용"
         diagnostic_msg = live_brief["_diagnostic"]
         live_brief = None  # treat as failure for downstream
     elif api_key_present:
         badge_color = "#f59e0b"
-        badge_text = "⚠️ LIVE 페치 실패 — 디스크 baseline 사용"
+        badge_text = "LIVE 페치 실패 — Baseline 사용"
     else:
         badge_color = "#9ca3af"
-        badge_text = "📁 Disk baseline (Gemini API 키 미설정)"
+        badge_text = "Baseline (Gemini API 키 미설정)"
 
     st.markdown(
         f"""<div style="display:inline-block; border:1px solid {badge_color}88;
@@ -957,14 +1003,14 @@ def render_news_editor() -> dict | None:
 
         col_load, col_apply, col_disk_warn = st.columns([1, 1, 4])
         with col_load:
-            if st.button("📥 디스크에서 로드"):
+            if st.button("디스크에서 로드"):
                 if NEWS_BRIEF_PATH.exists():
                     st.session_state.news_text = NEWS_BRIEF_PATH.read_text()
                     st.rerun()
                 else:
                     st.warning(f"{NEWS_BRIEF_PATH} 가 없습니다.")
         with col_apply:
-            apply_clicked = st.button("✅ 적용 (수동 모드)")
+            apply_clicked = st.button("적용 (수동 모드)")
 
         text = st.text_area(
             "JSON (수동 편집 모드에서만 사용됨)",
@@ -990,7 +1036,7 @@ def render_news_editor() -> dict | None:
 
 def render_autorefresh_sidebar() -> int:
     """Sidebar control for auto-refresh interval. Returns interval in minutes (0 = off)."""
-    st.sidebar.header("🔄 자동 갱신")
+    st.sidebar.header("자동 갱신")
     options = [0, 5, 10, 15, 30, 60]
     labels = {0: "끔 (수동)", 5: "5분", 10: "10분", 15: "15분 (추천)", 30: "30분", 60: "60분"}
     minutes = st.sidebar.selectbox(
@@ -1005,15 +1051,15 @@ def render_autorefresh_sidebar() -> int:
     )
     if minutes > 0:
         st_autorefresh(interval=minutes * 60 * 1000, key=f"autorefresh_{minutes}m")
-        st.sidebar.caption(f"⏱️ {minutes}분마다 자동 갱신 중")
+        st.sidebar.caption(f"{minutes}분마다 자동 갱신 중")
     else:
-        st.sidebar.caption("⏸ 자동 갱신 꺼짐 — 우상단 🔄 버튼으로 수동 갱신")
+        st.sidebar.caption("자동 갱신 꺼짐 — 우상단 Refresh 버튼으로 수동 갱신")
     st.sidebar.markdown("---")
     return minutes
 
 
 _WEIGHT_EXPLAINER = """
-**🌦 비유: 날씨 / 계절 / 기후**
+**비유: 날씨 / 계절 / 기후**
 
 같은 "온도"라도 묻는 시간 단위마다 다른 도구가 필요해요.
 
@@ -1025,17 +1071,17 @@ _WEIGHT_EXPLAINER = """
 
 ---
 
-**📍 ST (수 시간)** — 마이크로 구조 + 강제 플로우 강조
+**ST (수 시간)** — 마이크로 구조 + 강제 플로우 강조
 
 - 오더북 **18%** · 청산 16% · 현물-선물 16% · 펀딩 14%
 - 매크로 **2%** · 뉴스 **0%** (수 시간엔 거의 무의미)
 
-**📍 MT (수 일)** — 포지셔닝 + 파생 구조 강조
+**MT (수 일)** — 포지셔닝 + 파생 구조 강조
 
 - 펀딩 **17%** · 옵션스큐 15% · 베이시스 13% · GEX 9%
 - 오더북 **2%** (며칠 후엔 책 다 바뀜)
 
-**📍 LT (수 주)** — 거시 + 온체인 + 심층 베이시스 강조
+**LT (수 주)** — 거시 + 온체인 + 심층 베이시스 강조
 
 - 매크로 **24%** · 온체인 18% · 베이시스 14% · IV/RV 10%
 - 청산 **0%** · 오더북 **1%** (장기 추세엔 의미 없음)
@@ -1063,7 +1109,7 @@ _WEIGHT_EXPLAINER = """
 
 def render_weight_sidebar() -> dict[str, float]:
     st.sidebar.header("가중치 오버라이드")
-    with st.sidebar.popover("❓ ST/MT/LT 가중치가 왜 달라요?", use_container_width=True):
+    with st.sidebar.popover("ST/MT/LT 가중치가 왜 달라요?", use_container_width=True):
         st.markdown(_WEIGHT_EXPLAINER)
 
     if "weights" not in st.session_state:
@@ -1170,7 +1216,7 @@ def render_footer() -> None:
 def main() -> None:
     st.set_page_config(
         page_title="BTC Futures Decision",
-        page_icon="📈",
+        page_icon=None,
         layout="wide",
     )
 
@@ -1203,7 +1249,7 @@ def main() -> None:
     render_signal_categories(result)
     _render_section_conclusion(_conclude_signal_categories_text(result))
 
-    with st.expander("🎓 12개 신호 자세한 데이터 보기", expanded=False):
+    with st.expander("12개 신호 자세한 데이터 보기", expanded=False):
         render_signal_table(result)
         _render_section_conclusion(_conclude_signal_table_text(result))
 
