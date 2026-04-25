@@ -512,9 +512,10 @@ def render_news_editor() -> dict | None:
     if "news_mode" not in st.session_state:
         st.session_state.news_mode = "live" if live_brief else "manual"
 
-    # 4) Status badge.
-    if live_brief:
-        n_events = len(live_brief.get("events", []))
+    # 4) Status badge + diagnostic on partial failures.
+    diagnostic_msg: str | None = None
+    if live_brief and live_brief.get("events"):
+        n_events = len(live_brief["events"])
         gen_at = live_brief.get("generated_at_utc", "")
         try:
             gen_dt = datetime.fromisoformat(gen_at)
@@ -524,6 +525,12 @@ def render_news_editor() -> dict | None:
             ts_label = "방금"
         badge_color = "#ef4444"
         badge_text = f"🔴 LIVE  ·  {n_events} events  ·  {ts_label} 갱신"
+    elif live_brief is not None and "_diagnostic" in live_brief:
+        # Pipeline ran but no usable events — show why.
+        badge_color = "#f59e0b"
+        badge_text = "⚠️ LIVE 페치 부분 실패 — 디스크 baseline 사용"
+        diagnostic_msg = live_brief["_diagnostic"]
+        live_brief = None  # treat as failure for downstream
     elif api_key_present:
         badge_color = "#f59e0b"
         badge_text = "⚠️ LIVE 페치 실패 — 디스크 baseline 사용"
@@ -537,6 +544,8 @@ def render_news_editor() -> dict | None:
         font-size:12px; margin-bottom:8px;">{badge_text}</div>""",
         unsafe_allow_html=True,
     )
+    if diagnostic_msg:
+        st.caption(f"진단: {diagnostic_msg}")
 
     # 5) Manual override toggle.
     if live_brief:

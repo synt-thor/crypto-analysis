@@ -225,19 +225,61 @@ def build_news_brief(
 ) -> dict[str, Any] | None:
     """Returns a news_brief dict ready for signals/news.py, or None on failure.
 
-    None signals "use disk baseline" — caller should fall back gracefully.
+    On failure paths, attaches a `_diagnostic` key to a stub dict so the
+    caller can surface the exact reason (RSS empty, filter empty, Gemini
+    error, SDK missing, etc.) instead of silently falling back.
     """
     if not api_key:
         return None  # No key → skip live; caller uses disk baseline.
 
     raw = fetch_headlines(window_hours=window_hours)
     if not raw:
-        logger.info("No headlines returned from any RSS source")
-        return None
+        return {
+            "events": [],
+            "macro_calendar": [],
+            "_diagnostic": (
+                "RSS 페치에서 0건 반환 — Streamlit Cloud에서 외부 RSS가 막혔거나 "
+                "모든 소스가 일시 장애. 1분 후 재시도."
+            ),
+        }
 
     relevant = _filter_relevant(raw, cap=max_headlines)
     if not relevant:
-        logger.info("No relevant headlines after keyword filter (raw=%d)", len(raw))
-        return None
+        return {
+            "events": [],
+            "macro_calendar": [],
+            "_diagnostic": (
+                f"RSS는 {len(raw)}건 받았지만 키워드 화이트리스트 통과 0건 — "
+                "최근 24시간에 BTC/Trump/Fed 관련 헤드라인이 정말 없을 수도 있음."
+            ),
+        }
 
-    return score_with_gemini(relevant, api_key=api_key, window_hours=window_hours)
+    # Try Gemini scoring; on failure return diagnostic stub.
+    try:
+        from google import genai  # noqa: F401
+    except ImportError:
+        return {
+            "events": [],
+            "macro_calendar": [],
+            "_diagnostic": (
+                "google-genai 패키지가 설치되지 않음. Streamlit Cloud에서 "
+                "Manage app → Reboot app 으로 venv 재구성 필요."
+            ),
+        }
+
+    scored = score_with_gemini(relevant, api_key=api_key, window_hours=window_hours)
+    if scored is None:
+        return {
+            "events": [],
+            "macro_calendar": [],
+            "_diagnostic": (
+                f"Gemini 호출 실패 (입력 헤드라인 {len(relevant)}건). "
+                "키 유효성·할당량·일시 장애 가능. 콘솔 로그 확인."
+            ),
+        }
+    if not scored.get("events"):
+        scored["_diagnostic"] = (
+            f"Gemini 호출 성공했으나 events 0개 — 입력 {len(relevant)}건이 "
+            "모두 노이즈로 분류됐거나 모델 응답 파싱 문제."
+        )
+    return scored
