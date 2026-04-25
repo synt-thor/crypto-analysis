@@ -49,9 +49,183 @@ from crypto_analysis.signals.option_skew import compute as option_skew_compute
 from crypto_analysis.signals.orderbook import compute as orderbook_compute
 from crypto_analysis.signals.spot_futures import compute as spot_futures_compute
 
+# ─── Defensive monkey-patches ────────────────────────────────────────────────
+# Streamlit Cloud reuses its venv across deploys. If a previous build cached an
+# older crypto_analysis package, newly added module attributes (introduced after
+# that build) will be missing at runtime even though the source is up-to-date.
+# Sys.path prepend usually fixes this, but if the package is also imported via
+# editable .pth, attribute resolution can still hit the cached site-packages.
+# These shims attach the functions directly to the module objects when missing,
+# guaranteeing the live app works regardless of pip-install state.
+if not hasattr(deribit, "index_price"):
+    from crypto_analysis.config import DERIBIT_REST as _DERIBIT_REST
+    from crypto_analysis.http import get_json as _get_json
+
+    def _index_price_shim(index_name: str = "btc_usd") -> float:
+        payload = _get_json(
+            f"{_DERIBIT_REST}/public/get_index_price",
+            params={"index_name": index_name},
+        )
+        result = payload.get("result", payload) if isinstance(payload, dict) else {}
+        return float(result.get("index_price") or 0.0)
+
+    deribit.index_price = _index_price_shim  # type: ignore[attr-defined]
+
+if not hasattr(exchanges, "coinbase_candles_range"):
+    from crypto_analysis.config import COINBASE_REST as _COINBASE_REST
+    from crypto_analysis.http import get_json as _get_json2
+
+    def _coinbase_candles_range_shim(
+        product_id: str = "BTC-USD",
+        granularity: int = 3600,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> pd.DataFrame:
+        from datetime import datetime as _dt, timezone as _tz
+        if start_ms is None or end_ms is None:
+            rows = _get_json2(
+                f"{_COINBASE_REST}/products/{product_id}/candles",
+                {"granularity": granularity},
+            )
+            df = pd.DataFrame(rows or [], columns=["time", "low", "high", "open", "close", "volume"])
+            if not df.empty:
+                df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
+                df["product_id"] = product_id
+            return df.sort_values("ts").reset_index(drop=True) if not df.empty else df
+        chunk_secs = 300 * granularity
+        cursor = start_ms // 1000
+        end_s = end_ms // 1000
+        frames: list[pd.DataFrame] = []
+        while cursor < end_s:
+            chunk_end = min(cursor + chunk_secs, end_s)
+            rows = _get_json2(
+                f"{_COINBASE_REST}/products/{product_id}/candles",
+                {
+                    "granularity": granularity,
+                    "start": _dt.fromtimestamp(cursor, tz=_tz.utc).isoformat(),
+                    "end": _dt.fromtimestamp(chunk_end, tz=_tz.utc).isoformat(),
+                },
+            )
+            if rows:
+                frames.append(pd.DataFrame(rows, columns=["time", "low", "high", "open", "close", "volume"]))
+            cursor = chunk_end
+        if not frames:
+            return pd.DataFrame()
+        df = pd.concat(frames, ignore_index=True)
+        df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        df["product_id"] = product_id
+        return df.sort_values("ts").drop_duplicates("ts").reset_index(drop=True)
+
+    exchanges.coinbase_candles_range = _coinbase_candles_range_shim  # type: ignore[attr-defined]
+
 NEWS_BRIEF_PATH = Path(__file__).parent / "data" / "news_brief.json"
 
 VERDICT_COLORS = {"LONG": "#22c55e", "SHORT": "#ef4444", "NEUTRAL": "#9ca3af"}
+
+# Detailed tooltips for each signal's weight slider — explains what the signal
+# measures, its data source, and how its score maps to LONG/SHORT bias.
+SIGNAL_HELP: dict[str, str] = {
+    "funding": (
+        "**퍼펫추얼 펀딩레이트** (역추세)\n\n"
+        "Deribit BTC-PERPETUAL의 8시간 펀딩을 APR로 환산 + 7일 z-score.\n\n"
+        "- 극단적 **+펀딩** (롱→숏 지급) = 롱 과열 → **숏 바이어스**\n"
+        "- 극단적 **−펀딩** (숏→롱 지급) = 숏 과열 → **롱 바이어스**\n"
+        "- 기준: 30% APR = crowded, 80% APR = extreme\n"
+        "- 소스: `deribit.funding_rate_history`"
+    ),
+    "spot_futures": (
+        "**현물 vs 퍼펫추얼 프리미엄** (역추세)\n\n"
+        "Deribit BTC 퍼프 마크 − Deribit BTC 인덱스(현물) 괴리.\n\n"
+        "- 퍼프 > 현물 = 레버리지 롱 수요 → **숏 바이어스**\n"
+        "- 퍼프 < 현물 = 디레버리징·스트레스 → **롱 바이어스**\n"
+        "- 20bp(0.2%) 괴리를 풀 스케일로 tanh 매핑\n"
+        "- 수 시간 단위 마이크로 구조 신호"
+    ),
+    "option_skew": (
+        "**25Δ 리스크리버설 (RR)** (트렌드)\n\n"
+        "`RR = 25Δ 콜 IV − 25Δ 풋 IV`, 최근접 만기(DTE ≥ 7일).\n\n"
+        "- **+RR** (콜 프리미엄) = 상승 포지셔닝 → **롱 바이어스**\n"
+        "- **−RR** (풋 프리미엄) = 헷지·공포 → **숏 바이어스**\n"
+        "- 5vol pp를 풀 스케일로, Black-Scholes 델타 직접 계산 (r=0)\n"
+        "- 소스: Deribit 옵션 체인 book_summary"
+    ),
+    "basis": (
+        "**만기 선물 연율화 베이시스** (역추세)\n\n"
+        "Front 만기 선물 프리미엄을 연율로 환산 (DTE ≥ 7일 필터).\n\n"
+        "- **깊은 콘탱고** (APR 25%+) = 투기성 롱 프리미엄 → **숏 바이어스**\n"
+        "- 정상 콘탱고 (0~15%) = 중립·캐리 약한 롱\n"
+        "- **백워데이션** = 현물 강세 또는 스트레스 → **롱 바이어스**\n"
+        "- 소스: Deribit book_summary + 인덱스 가격"
+    ),
+    "oi": (
+        "**미결제약정(OI) × 가격 변화** (트렌드)\n\n"
+        "OI·가격 변화를 4국면으로 분류:\n\n"
+        "- 가격↑ + OI↑ = 신규 롱 빌드업 → **롱**\n"
+        "- 가격↓ + OI↑ = 신규 숏 빌드업 → **숏**\n"
+        "- 가격↑ + OI↓ = 숏 커버링 (약한 랠리) → 미미한 롱\n"
+        "- 가격↓ + OI↓ = 롱 청산 페이딩 → 미미한 숏\n"
+        "- 라이브 단일 스냅샷에선 표본 부족으로 신뢰도 낮음"
+    ),
+    "macro": (
+        "**크로스 자산 매크로 모멘텀** (트렌드)\n\n"
+        "5일 vs 20일 이동평균 모멘텀 × BTC 과거 상관 부호.\n\n"
+        "- **DXY ↑** = BTC 부정적 (달러 강세)\n"
+        "- **SPY / QQQ ↑** = BTC 긍정적 (위험선호 동조)\n"
+        "- **VIX ↑** = BTC 부정적 (위험회피)\n"
+        "- **10Y 수익률 ↑** = BTC 부정적 (유동성 축소)\n"
+        "- 소스: yfinance (DX-Y.NYB, SPY, QQQ, ^VIX, ^TNX, GC=F)"
+    ),
+    "iv_skew": (
+        "**IV − RV 스프레드** (역추세)\n\n"
+        "ATM 임플라이드 변동성 − Deribit 실현 변동성.\n\n"
+        "- **IV ≫ RV** = 옵션 프리미엄 비쌈·공포 헷지 → **롱 바이어스**\n"
+        "- **IV ≪ RV** = 안도·콤플레이선시 → **숏 바이어스**\n"
+        "- 20pp 스프레드를 풀 스케일로 매핑\n"
+        "- 소스: Deribit 최근접 ATM 옵션 ticker + historical_volatility"
+    ),
+    "gex": (
+        "**딜러 감마 편향 프록시** (트렌드)\n\n"
+        "0~60일 옵션의 감마 가중 OI 비율:\n"
+        "`net = (콜 γ-OI − 풋 γ-OI) / (콜 γ-OI + 풋 γ-OI)`\n\n"
+        "- **콜 편중** = 상승 포지셔닝 → **롱 바이어스**\n"
+        "- **풋 편중** = 헷지 포지셔닝 → **숏 바이어스**\n"
+        "- 딜러 실제 재고는 불가지, \"포지셔닝 편향\" 프록시\n"
+        "- Black-Scholes 감마 직접 계산"
+    ),
+    "liquidations": (
+        "**청산 플로우** (역추세)\n\n"
+        "최근 Deribit 선물 1000건 거래 중 liquidation 플래그 집계.\n\n"
+        "- **롱 청산 우세** (강제 매도) = 단기 바닥 시그널 → **롱 바이어스**\n"
+        "- **숏 청산 우세** (강제 매수) = 숏 스퀴즈 고점 → **숏 바이어스**\n"
+        "- Deribit만 집계 → CEX 전체 플로우보다 표본 작음\n"
+        "- 청산 0건이면 비활성 (conf=0)"
+    ),
+    "orderbook": (
+        "**오더북 뎁스 임밸런스** (트렌드)\n\n"
+        "퍼펫추얼 상위 10호가의 매수·매도 볼륨 비율.\n\n"
+        "- **bid 볼륨 우세** = 단기 매수 압력 → **롱 바이어스**\n"
+        "- **ask 볼륨 우세** = 단기 매도 압력 → **숏 바이어스**\n"
+        "- 스푸핑 취약 → 점수 상한 ±0.6\n"
+        "- 수 분~수 시간 타임프레임"
+    ),
+    "onchain": (
+        "**비트코인 네트워크 컨텍스트** (약한 컨텍스트)\n\n"
+        "mempool.space의 멤풀·수수료·해시레이트·난이도.\n\n"
+        "- 극단적 수수료·백로그 = 투기 과열 → 약한 **숏**\n"
+        "- 해시레이트·난이도 상승 = 불장 모멘텀 → 약한 **롱**\n"
+        "- 단기 가격 예측력은 약함, 거시 컨텍스트 목적\n"
+        "- 소스: `mempool.space/api` 무료 엔드포인트"
+    ),
+    "news": (
+        "**구조화 뉴스 브리프** (컨텍스트)\n\n"
+        "`data/news_brief.json`의 이벤트 리스트를 집계.\n\n"
+        "- 각 이벤트: `bias` (long/short/neutral) × `weight` (0~1)\n"
+        "- 최대 점수 ±0.6, 신뢰도 최대 0.5로 제한\n"
+        "  (뉴스→숫자 변환이 노이지하므로)\n"
+        "- FOMC·CPI 등 매크로 캘린더도 함께 표시\n"
+        "- 편집: 본문 expander에서 JSON 직접 수정"
+    ),
+}
 
 
 # ─── Cached data fetchers ────────────────────────────────────────────────────
@@ -361,6 +535,7 @@ def render_weight_sidebar() -> dict[str, float]:
             value=float(st.session_state.weights.get(name, DEFAULT_WEIGHTS[name])),
             step=0.01,
             key=f"w_{name}",
+            help=SIGNAL_HELP.get(name),
         )
     st.session_state.weights = weights
 
