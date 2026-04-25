@@ -9,4 +9,6 @@ tenacity>=8.3
 yfinance>=0.2.40
 streamlit>=1.36
 # Install the local crypto_analysis package itself (src layout via pyproject.toml).
-.
+# Editable install (-e) bypasses pip's wheel cache so post-deploy source edits
+# always take effect without bumping the version string.
+-e .
