@@ -15,6 +15,7 @@ dependencies = [
   "tenacity>=8.3",
   "yfinance>=0.2.40",
   "streamlit>=1.36",
+  "streamlit-autorefresh>=1.0",
   "feedparser>=6.0",
   "google-genai>=1.0",
 ]

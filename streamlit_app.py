@@ -23,6 +23,7 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 
 from crypto_analysis.backtest import run as run_backtest
 from crypto_analysis.collectors import deribit, exchanges, onchain
@@ -851,6 +852,30 @@ def render_news_editor() -> dict | None:
         return None
 
 
+def render_autorefresh_sidebar() -> int:
+    """Sidebar control for auto-refresh interval. Returns interval in minutes (0 = off)."""
+    st.sidebar.header("🔄 자동 갱신")
+    options = [0, 5, 10, 15, 30, 60]
+    labels = {0: "끔 (수동)", 5: "5분", 10: "10분", 15: "15분 (추천)", 30: "30분", 60: "60분"}
+    minutes = st.sidebar.selectbox(
+        "갱신 주기",
+        options=options,
+        index=options.index(15),
+        format_func=lambda m: labels[m],
+        help=(
+            "선택한 주기로 페이지가 자동 재실행되어 모든 데이터를 새로고침합니다. "
+            "캐시 TTL과 같은 15분 권장 (뉴스 캐시도 15분이라 정확히 맞물림)."
+        ),
+    )
+    if minutes > 0:
+        st_autorefresh(interval=minutes * 60 * 1000, key=f"autorefresh_{minutes}m")
+        st.sidebar.caption(f"⏱️ {minutes}분마다 자동 갱신 중")
+    else:
+        st.sidebar.caption("⏸ 자동 갱신 꺼짐 — 우상단 🔄 버튼으로 수동 갱신")
+    st.sidebar.markdown("---")
+    return minutes
+
+
 def render_weight_sidebar() -> dict[str, float]:
     st.sidebar.header("가중치 오버라이드")
 
@@ -962,6 +987,7 @@ def main() -> None:
         layout="wide",
     )
 
+    render_autorefresh_sidebar()
     weights = render_weight_sidebar()
 
     inputs = fetch_market_inputs()
