@@ -604,8 +604,12 @@ def render_action_guide(multi) -> None:
     )
 
 
-def render_key_messages(result, news_brief: dict | None) -> None:
-    """Dynamic regime/event insights — only show ones that apply right now."""
+def render_key_messages(result, news_brief: dict | None) -> int:
+    """Dynamic regime/event insights — only show ones that apply right now.
+
+    Returns the number of messages displayed (so the caller can append a
+    conclusion box).
+    """
     contribs = {c["name"]: c for c in result.contributions}
     msgs: list[tuple[str, str]] = []  # (icon, text)
 
@@ -655,7 +659,7 @@ def render_key_messages(result, news_brief: dict | None) -> None:
         msgs.append(("💥", f"**청산 플로우**: {side}."))
 
     if not msgs:
-        return  # nothing notable — keep page clean
+        return 0  # nothing notable — keep page clean
 
     items_html = "".join(
         f'<li style="margin:6px 0;">{icon} {text}</li>' for icon, text in msgs
@@ -672,6 +676,138 @@ def render_key_messages(result, news_brief: dict | None) -> None:
         </div>""",
         unsafe_allow_html=True,
     )
+    return len(msgs)
+
+
+def _render_section_conclusion(text: str) -> None:
+    """Small green box: '👉 한 마디로: ...'"""
+    st.markdown(
+        f"""<div style="background:#22c55e15; border-left:3px solid #22c55e;
+        padding:8px 14px; margin:4px 0 18px 0; border-radius:4px; font-size:13px;">
+        👉 <b>한 마디로</b>: {text}
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_easy_summary(decision, multi, news_brief: dict | None) -> None:
+    """Top-of-page big-box plain-Korean summary tying everything together."""
+    # Headline (overall verdict)
+    if decision.verdict == "LONG":
+        if decision.score >= 0.20:
+            head = "지금 BTC 선물은 **매수 쪽이 우세**한 상태입니다."
+        else:
+            head = "지금 BTC 선물은 **약하게 매수 쪽**으로 기울어 있습니다."
+    elif decision.verdict == "SHORT":
+        if decision.score <= -0.20:
+            head = "지금 BTC 선물은 **매도 쪽이 우세**한 상태입니다."
+        else:
+            head = "지금 BTC 선물은 **약하게 매도 쪽**으로 기울어 있습니다."
+    else:
+        head = "지금 BTC 선물은 **명확한 방향이 없는 상태**입니다."
+
+    # ST line
+    if multi.st.verdict == "LONG":
+        st_line = "**단기(수 시간)**: 매수 우호 — 짧은 매수 시도 가능."
+    elif multi.st.verdict == "SHORT":
+        st_line = "**단기(수 시간)**: 매도 우호 — 짧은 숏 또는 헷지 검토."
+    else:
+        st_line = "**단기(수 시간)**: 방향 없음 — 쉬는 게 답."
+
+    # MT line
+    if multi.mt.verdict == "LONG":
+        mt_line = "**중기(며칠)**: 매수 우호 — 분할 매수 환경."
+    elif multi.mt.verdict == "SHORT":
+        mt_line = "**중기(며칠)**: 매도 우호 — 포지션 축소 검토."
+    else:
+        mt_line = "**중기(며칠)**: 방향 없음 — 양방향 변동성 매수가 합리적."
+
+    # LT line
+    if multi.lt.verdict == "LONG":
+        lt_line = "**장기(수 주)**: 매수 우호 — 분할 매수 또는 보유."
+    elif multi.lt.verdict == "SHORT":
+        lt_line = "**장기(수 주)**: 매도 우호 — 보유 줄이기 검토."
+    else:
+        lt_line = "**장기(수 주)**: 방향 없음 — 추가 신호 대기."
+
+    # Optional calendar nudge
+    cal_line = ""
+    if news_brief and news_brief.get("macro_calendar"):
+        first = news_brief["macro_calendar"][0]
+        cal_line = f"<br>📅 <b>{first}</b> 결과 후 다시 점검하세요."
+
+    st.markdown(
+        f"""<div style="background: linear-gradient(135deg, #1e3a5f33, #0f172a44);
+        border:2px solid #60a5fa88; border-radius:12px;
+        padding:18px 22px; margin:8px 0 14px 0;">
+            <div style="font-size:15px; font-weight:700; margin-bottom:10px;">
+                📝 가장 쉬운 결론
+            </div>
+            <div style="font-size:14px; line-height:1.7;">
+                {head}<br>
+                · {st_line}<br>
+                · {mt_line}<br>
+                · {lt_line}
+                {cal_line}
+            </div>
+            <div style="font-size:11px; opacity:0.7; margin-top:10px;
+                        padding-top:8px; border-top:1px solid #ffffff15;">
+                ⚠️ 신호는 확률입니다. <b>잃어도 되는 돈으로만</b> 거래하시고,
+                손절선을 미리 정하세요. 한 신호에 풀 사이즈 진입 금지.
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def _conclude_key_messages_text(msg_count: int) -> str:
+    if msg_count == 0:
+        return "지금 시장에는 **특별히 경계할 큰 시그널이 없어요**. 평소 그대로 진행해도 됩니다."
+    if msg_count >= 2:
+        return (
+            "여러 경고가 동시에 떠 있어요. **큰 베팅 자제하고** 포지션 사이즈를 줄이거나 "
+            "관망하는 게 안전합니다."
+        )
+    return "주목할 시그널이 있어요. **풀 사이즈 진입은 피하고** 신중하게 행동하세요."
+
+
+def _conclude_signal_categories_text(result) -> str:
+    by_name = {c["name"]: c for c in result.contributions}
+    pos = sum(1 for c in by_name.values() if c["score"] > 0.1 and c["confidence"] >= 0.15)
+    neg = sum(1 for c in by_name.values() if c["score"] < -0.1 and c["confidence"] >= 0.15)
+    flat = len(by_name) - pos - neg
+    if pos > neg + 2:
+        tag = "**매수 신호가 우세**"
+    elif neg > pos + 2:
+        tag = "**매도 신호가 우세**"
+    else:
+        tag = "**매수·매도 신호가 비슷한 균형**"
+    return (
+        f"매수 신호 {pos}개 · 매도 신호 {neg}개 · 균형/비활성 {flat}개 → {tag}. "
+        f"임계({'+0.15' if pos > neg else '-0.15'}) 통과 여부는 가중치 합산 결과에 달려 있어요."
+    )
+
+
+def _conclude_signal_table_text(result) -> str:
+    contribs = result.contributions
+    if not contribs:
+        return "신호 데이터가 비어 있어요."
+    pos = [c for c in contribs if c["contribution"] > 0]
+    neg = [c for c in contribs if c["contribution"] < 0]
+    top_pos = max(pos, key=lambda c: c["contribution"], default=None)
+    top_neg = min(neg, key=lambda c: c["contribution"], default=None)
+    parts = []
+    if top_pos:
+        parts.append(
+            f"오늘 가장 크게 **매수 쪽으로 민** 신호: "
+            f"**{SIGNAL_NAME_KR.get(top_pos['name'], top_pos['name'])}**"
+        )
+    if top_neg:
+        parts.append(
+            f"가장 크게 **매도 쪽으로 누른** 신호: "
+            f"**{SIGNAL_NAME_KR.get(top_neg['name'], top_neg['name'])}**"
+        )
+    return ". ".join(parts) + "."
 
 
 def render_signal_categories(result) -> None:
@@ -1002,14 +1138,24 @@ def main() -> None:
     decision = decide(result)
     multi = decide_multi(signals)
 
+    # Top-of-page plain conclusion (largest box, sets the frame).
+    render_easy_summary(decision, multi, news_brief)
+
     render_verdict_block(decision, inputs["perp_mark"], inputs["spot_price"])
     render_plain_summary(decision, result)
     render_timeframes(multi)
     render_action_guide(multi)
-    render_key_messages(result, news_brief)
+
+    msg_count = render_key_messages(result, news_brief)
+    _render_section_conclusion(_conclude_key_messages_text(msg_count))
+
     render_signal_categories(result)
+    _render_section_conclusion(_conclude_signal_categories_text(result))
+
     with st.expander("🎓 12개 신호 자세한 데이터 보기", expanded=False):
         render_signal_table(result)
+        _render_section_conclusion(_conclude_signal_table_text(result))
+
     render_backtest()
     render_footer()
 
