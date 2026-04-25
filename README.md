@@ -93,6 +93,60 @@ jupyter lab notebooks/backtest_results.ipynb
 
 퍼블릭 GitHub 저장소만 무료. 프라이빗이 필요하면 Streamlit for Teams 또는 Fly.io.
 
+## 실시간 뉴스 자동 반영 (Gemini)
+
+키를 설정하면 앱이 페이지 로드 시 RSS(CoinDesk, CoinTelegraph, Federal Reserve, BBC World/Politics/Business)를 자동 페치하고 Gemini 2.0 Flash로 점수화해 `news` 신호에 즉시 반영합니다. 트럼프 외교·관세·제재·연준 결정 등 시시각각 변하는 이슈를 사람 개입 없이 단기 의사결정에 즉시 반영하기 위함.
+
+**무료 — Gemini 2.0 Flash 무료 티어 (15 RPM, 일 1500회) + 모든 RSS 무료**
+
+### 1) Gemini API 키 발급 (1분)
+
+<https://aistudio.google.com/app/apikey> 접속 → Google 로그인 → "Create API key" 클릭 → 발급된 키 복사
+
+### 2) Streamlit Cloud Secrets에 등록
+
+배포된 앱에서:
+1. 우하단 **Manage app** 클릭
+2. **Settings** → **Secrets**
+3. 다음 한 줄 입력 후 저장:
+
+```toml
+GEMINI_API_KEY = "AIzaSy...여기에붙여넣기"
+```
+
+다음 페이지 로드부터 자동으로 LIVE 모드. 앱 재시작 불필요.
+
+### 3) 동작 확인
+
+페이지 상단에 다음 배지가 뜨면 정상:
+
+- 🔴 **LIVE · N events · M분 전 갱신** ← 키 등록 완료, 자동 페치 동작
+- ⚠️ **LIVE 페치 실패** ← 키는 있는데 Gemini API 호출 실패 (한도 초과 / 일시 장애)
+- 📁 **Disk baseline (Gemini API 키 미설정)** ← 키 없음, 정적 `data/news_brief.json` 사용
+
+### 4) 수동 오버라이드
+
+LIVE 모드에서도 expander 안의 토글 "수동 편집 사용"으로 사이드 by 사이드 비교·강제 교체 가능. 토글 끄면 다시 LIVE.
+
+### 캐시 동작
+
+- LIVE 브리프는 **15분 캐시**. 트레이더 사용량 기준 분당 호출 부하는 제로에 가까움
+- 헤더의 🔄 Refresh 버튼이 캐시 클리어 후 강제 재페치 (Gemini API 한 번 더 사용됨)
+
+### 로컬 테스트
+
+```bash
+export GEMINI_API_KEY="AIzaSy..."
+.venv/bin/python -c "
+import os
+from crypto_analysis.news_fetcher import build_news_brief
+b = build_news_brief(api_key=os.getenv('GEMINI_API_KEY'))
+print(f'events: {len(b[\"events\"])}')
+for e in b['events'][:5]:
+    print(f'  {e[\"bias\"]:7} w={e[\"weight\"]} :: {e[\"headline\"][:80]}')
+"
+```
+
 ## 뉴스·국제정세 레이어 사용법
 
 `signals/news.py`는 구조화된 브리프를 받습니다(의도적으로 자동 스크레이핑 없음 —

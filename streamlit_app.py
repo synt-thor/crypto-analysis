@@ -16,6 +16,7 @@ if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -287,6 +288,31 @@ def fetch_macro_panel(days: int = 45) -> pd.DataFrame:
     return macro_panel(days=days)
 
 
+def _get_gemini_api_key() -> str | None:
+    """Read GEMINI_API_KEY from Streamlit secrets first, then environment."""
+    try:
+        key = st.secrets.get("GEMINI_API_KEY")
+        if key:
+            return str(key)
+    except Exception:
+        pass
+    return os.getenv("GEMINI_API_KEY")
+
+
+@st.cache_data(ttl=900, show_spinner="📰 실시간 뉴스 페치 + Gemini 점수화…")
+def fetch_live_news_brief() -> dict | None:
+    """Returns auto-built news brief or None to fall back to disk baseline."""
+    api_key = _get_gemini_api_key()
+    if not api_key:
+        return None
+    try:
+        from crypto_analysis.news_fetcher import build_news_brief
+        return build_news_brief(window_hours=24, api_key=api_key)
+    except Exception as e:
+        st.warning(f"실시간 뉴스 페치 실패: {e}. 디스크 baseline으로 폴백합니다.")
+        return None
+
+
 @st.cache_data(ttl=3600, show_spinner="과거 데이터 백필 + 백테스트 실행 중…")
 def run_backtest_live(days: int, hold_hours: int):
     now = datetime.now(tz=timezone.utc)
@@ -466,17 +492,72 @@ def render_signal_table(result) -> None:
 
 
 def render_news_editor() -> dict | None:
-    """Returns parsed news_brief dict (or None on parse error)."""
+    """Returns the news_brief to use (live > manual override > disk baseline)."""
     st.subheader("뉴스 브리프")
 
+    # 1) Try live fetch (Gemini auto-scoring of RSS).
+    live_brief = fetch_live_news_brief()
+    api_key_present = _get_gemini_api_key() is not None
+
+    # 2) Initialise session textarea from disk baseline once.
     if "news_text" not in st.session_state:
         try:
-            st.session_state.news_text = NEWS_BRIEF_PATH.read_text() if NEWS_BRIEF_PATH.exists() else "{}"
+            st.session_state.news_text = (
+                NEWS_BRIEF_PATH.read_text() if NEWS_BRIEF_PATH.exists() else "{}"
+            )
         except Exception:
             st.session_state.news_text = "{}"
 
+    # 3) Default mode: live if available, else manual/disk.
+    if "news_mode" not in st.session_state:
+        st.session_state.news_mode = "live" if live_brief else "manual"
+
+    # 4) Status badge.
+    if live_brief:
+        n_events = len(live_brief.get("events", []))
+        gen_at = live_brief.get("generated_at_utc", "")
+        try:
+            gen_dt = datetime.fromisoformat(gen_at)
+            mins_ago = max(0, int((datetime.now(tz=timezone.utc) - gen_dt).total_seconds() / 60))
+            ts_label = f"{mins_ago}분 전"
+        except Exception:
+            ts_label = "방금"
+        badge_color = "#ef4444"
+        badge_text = f"🔴 LIVE  ·  {n_events} events  ·  {ts_label} 갱신"
+    elif api_key_present:
+        badge_color = "#f59e0b"
+        badge_text = "⚠️ LIVE 페치 실패 — 디스크 baseline 사용"
+    else:
+        badge_color = "#9ca3af"
+        badge_text = "📁 Disk baseline (Gemini API 키 미설정)"
+
+    st.markdown(
+        f"""<div style="display:inline-block; border:1px solid {badge_color}88;
+        border-radius:6px; padding:4px 10px; background:{badge_color}11;
+        font-size:12px; margin-bottom:8px;">{badge_text}</div>""",
+        unsafe_allow_html=True,
+    )
+
+    # 5) Manual override toggle.
+    if live_brief:
+        cols = st.columns([1, 4])
+        with cols[0]:
+            override = st.toggle(
+                "수동 편집 사용",
+                value=(st.session_state.news_mode == "manual"),
+                help="끄면 LIVE Gemini 브리프 사용, 켜면 아래 텍스트영역의 JSON 사용.",
+            )
+            st.session_state.news_mode = "manual" if override else "live"
+
+    # 6) Expander with JSON editor (always available as override).
     with st.expander("뉴스 브리프 보기 / 편집", expanded=False):
-        col_load, col_apply, _ = st.columns([1, 1, 4])
+        # Show live brief preview in read-only block when in live mode.
+        if live_brief and st.session_state.news_mode == "live":
+            st.caption("현재 LIVE 브리프 (읽기 전용 미리보기)")
+            st.json(live_brief, expanded=False)
+            st.caption("─ 아래는 디스크 baseline / 수동 편집용 ─")
+
+        col_load, col_apply, col_disk_warn = st.columns([1, 1, 4])
         with col_load:
             if st.button("📥 디스크에서 로드"):
                 if NEWS_BRIEF_PATH.exists():
@@ -485,17 +566,22 @@ def render_news_editor() -> dict | None:
                 else:
                     st.warning(f"{NEWS_BRIEF_PATH} 가 없습니다.")
         with col_apply:
-            apply_clicked = st.button("✅ 적용")
+            apply_clicked = st.button("✅ 적용 (수동 모드)")
 
         text = st.text_area(
-            "JSON",
+            "JSON (수동 편집 모드에서만 사용됨)",
             value=st.session_state.news_text,
-            height=300,
+            height=260,
             key="news_editor",
         )
         if apply_clicked:
             st.session_state.news_text = text
+            st.session_state.news_mode = "manual"
+            st.rerun()
 
+    # 7) Decide which brief to return.
+    if st.session_state.news_mode == "live" and live_brief:
+        return live_brief
     try:
         parsed = json.loads(st.session_state.news_text)
         return parsed if isinstance(parsed, dict) else None
