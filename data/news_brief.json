@@ -1,0 +1,50 @@
+{
+  "window_hours": 48,
+  "generated_at_utc": "2026-04-25T00:00:00Z",
+  "sources": [
+    "coindesk.com/daybook-us/2026/04/20",
+    "bydfi.com (April 2026 ETF flows)",
+    "federalreserve.gov/fomcminutes20260128",
+    "stlouisfed.org (Apr 1 2026 economic outlook)",
+    "coindesk.com/policy/2026/04/23",
+    "elliptic.co 2026 regulatory outlook",
+    "clearygottlieb.com 2026 digital assets regulatory update"
+  ],
+  "events": [
+    {"headline": "5 consecutive days of positive spot BTC ETF net inflows (~$900M week); Apr 16 intake $411M (2nd largest of month)",
+     "bias": "long", "weight": 0.8,
+     "rationale": "Institutional demand re-accelerating; first monthly positive ETF flow of 2026 ending 4-month outflow streak"},
+    {"headline": "Strategy (MSTR) added 34,164 BTC at avg $74,395; total 815,061 BTC",
+     "bias": "long", "weight": 0.5,
+     "rationale": "Corporate treasury continues accumulation near current price band"},
+    {"headline": "Morgan Stanley launches MSBT Bitcoin ETF — expanding institutional rails",
+     "bias": "long", "weight": 0.4,
+     "rationale": "New distribution channel for BTC exposure among wirehouse clients"},
+    {"headline": "BlackRock IBIT holdings exceed $61B; recent $900M+ inflows",
+     "bias": "long", "weight": 0.3,
+     "rationale": "Concentration of institutional demand but also flow signal"},
+    {"headline": "FOMC 28-29 April meeting; markets expect hold, questioning whether Fed can cut in 2026",
+     "bias": "neutral", "weight": 0.3,
+     "rationale": "Binary event risk — dovish tone = tailwind, hawkish hold = risk-off"},
+    {"headline": "Core PCE revised higher to 2.7% (from 2.4%); Fed cut path tightening",
+     "bias": "short", "weight": 0.5,
+     "rationale": "Sticky inflation reduces liquidity tailwind; USD firm pressures risk assets"},
+    {"headline": "Iran / Strait of Hormuz tension; possible renewed energy shock",
+     "bias": "short", "weight": 0.4,
+     "rationale": "Geopolitical risk premium + inflation channel; historically risk-off for BTC short-term"},
+    {"headline": "Kelp DeFi protocol exploit causing contagion jitters",
+     "bias": "short", "weight": 0.3,
+     "rationale": "DeFi stress events historically precede short-term crypto-wide drawdowns"},
+    {"headline": "Global regulatory convergence: Japan reclassifies crypto under FIEA; HK grants stablecoin licenses to HSBC & Anchorpoint; US GENIUS Act stablecoin framework advancing",
+     "bias": "long", "weight": 0.4,
+     "rationale": "Reduced regulatory risk premium across major jurisdictions"},
+    {"headline": "100+ crypto firms petition US Senate to move market structure bill markup",
+     "bias": "long", "weight": 0.2,
+     "rationale": "Industry coordinated push; legislative clarity is medium-term positive"}
+  ],
+  "macro_calendar": [
+    "FOMC meeting 2026-04-28/29",
+    "Q1 advance GDP estimate (this week)",
+    "March CPI already released; next CPI May 13"
+  ]
+}
