@@ -63,8 +63,9 @@ def fetch_market_inputs() -> dict:
     if not funding.empty:
         funding["funding_rate"] = funding.get("interest_1h", funding.get("funding_rate"))
     liq_trades = deribit.last_liquidations("BTC", count=1000)
-    binance_spot = exchanges.binance_klines("BTCUSDT", "1m", limit=5)
-    spot_price = float(binance_spot["close"].iloc[-1]) if not binance_spot.empty else 0.0
+    # Spot reference: Deribit BTC index (volume-weighted; no geo-block).
+    # Binance public API blocks US datacenter IPs which fails on Streamlit Cloud.
+    spot_price = deribit.index_price("btc_usd")
     mempool = onchain.mempool_snapshot()
     fees = onchain.fees_recommended()
     hr = onchain.hashrate_3d()
@@ -114,7 +115,9 @@ def run_backtest_live(days: int, hold_hours: int):
     funding = deribit.funding_rate_history(PERPETUAL, start_ms, end_ms)
     if not funding.empty:
         funding["funding_rate"] = funding.get("interest_1h", funding.get("funding_rate"))
-    spot = exchanges.binance_klines("BTCUSDT", "1h", start_ms=start_ms, end_ms=end_ms, limit=1000)
+    # Coinbase candles instead of Binance (Binance blocks US datacenter IPs).
+    spot = exchanges.coinbase_candles_range("BTC-USD", granularity=3600,
+                                            start_ms=start_ms, end_ms=end_ms)
 
     return run_backtest(
         perp_ohlcv=perp.sort_values("ts").reset_index(drop=True),

@@ -66,3 +66,44 @@ def coinbase_candles(
     df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
     df["product_id"] = product_id
     return df.sort_values("ts").reset_index(drop=True)
+
+
+def coinbase_candles_range(
+    product_id: str = "BTC-USD",
+    granularity: int = 3600,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> pd.DataFrame:
+    """Chunked Coinbase candles for arbitrary windows (Coinbase caps at 300/call).
+
+    Used as a Binance-free spot replacement on geo-blocked deployments
+    (Streamlit Cloud, etc.).
+    """
+    from datetime import datetime, timezone
+    if start_ms is None or end_ms is None:
+        return coinbase_candles(product_id, granularity)
+    chunk_secs = 300 * granularity
+    cursor = start_ms // 1000
+    end_s = end_ms // 1000
+    frames: list[pd.DataFrame] = []
+    while cursor < end_s:
+        chunk_end = min(cursor + chunk_secs, end_s)
+        rows = get_json(
+            f"{COINBASE_REST}/products/{product_id}/candles",
+            {
+                "granularity": granularity,
+                "start": datetime.fromtimestamp(cursor, tz=timezone.utc).isoformat(),
+                "end": datetime.fromtimestamp(chunk_end, tz=timezone.utc).isoformat(),
+            },
+        )
+        if rows:
+            frames.append(
+                pd.DataFrame(rows, columns=["time", "low", "high", "open", "close", "volume"])
+            )
+        cursor = chunk_end
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    df["ts"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df["product_id"] = product_id
+    return df.sort_values("ts").drop_duplicates("ts").reset_index(drop=True)

@@ -118,6 +118,15 @@ def order_book(instrument_name: str, depth: int = 20) -> dict[str, Any]:
     return _call("get_order_book", {"instrument_name": instrument_name, "depth": depth})
 
 
+def index_price(index_name: str = "btc_usd") -> float:
+    """Deribit's BTC index price (volume-weighted across major spots).
+
+    Reliable spot reference that works from any IP — no geo-blocking.
+    """
+    result = _call("get_index_price", {"index_name": index_name})
+    return float(result.get("index_price") or 0.0)
+
+
 def option_book_summary(currency: str = "BTC") -> pd.DataFrame:
     """All option chains with IVs. One row per option instrument.
 
