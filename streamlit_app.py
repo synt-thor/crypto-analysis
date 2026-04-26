@@ -549,8 +549,53 @@ def render_timeframes(multi) -> None:
                 )
 
 
-def render_plain_summary(decision, result) -> None:
-    """1-line plain interpretation under the verdict block."""
+def _top_news_html(news_brief: dict | None, n: int = 3) -> str:
+    """Returns HTML for the 'top N news' subsection, or '' if no news."""
+    if not news_brief or not news_brief.get("events"):
+        return ""
+    events = sorted(
+        news_brief["events"],
+        key=lambda e: float(e.get("weight", 0) or 0),
+        reverse=True,
+    )[:n]
+    if not events:
+        return ""
+
+    bias_marker = {
+        "long":    ("▲", "#22c55e"),
+        "short":   ("▼", "#ef4444"),
+        "neutral": ("·", "#9ca3af"),
+    }
+
+    rows = []
+    for ev in events:
+        bias = str(ev.get("bias", "neutral")).lower()
+        marker, color = bias_marker.get(bias, bias_marker["neutral"])
+        weight = float(ev.get("weight", 0) or 0)
+        headline = str(ev.get("headline", ""))[:80]
+        rows.append(
+            f'<div style="margin:5px 0; font-size:13px; line-height:1.5;">'
+            f'<span style="color:{color}; font-weight:600; '
+            f'display:inline-block; min-width:18px;">{marker}</span>'
+            f'<span style="margin-left:4px;">{headline}</span>'
+            f'<span style="opacity:0.45; font-size:11px; margin-left:8px;">'
+            f'w={weight:.1f}</span>'
+            f'</div>'
+        )
+
+    return (
+        f'<div style="margin-top:12px; padding-top:10px;'
+        f' border-top:1px solid #ffffff10;">'
+        f'<div style="font-size:10px; letter-spacing:1.5px;'
+        f' text-transform:uppercase; opacity:0.6; margin-bottom:6px;">'
+        f'주요 뉴스 (상위 {len(events)}건)</div>'
+        f'{"".join(rows)}'
+        f'</div>'
+    )
+
+
+def render_plain_summary(decision, result, news_brief: dict | None = None) -> None:
+    """1-line plain interpretation + optional top-news subsection."""
     contribs = result.contributions
     if not contribs:
         return
@@ -572,6 +617,7 @@ def render_plain_summary(decision, result) -> None:
     }[decision.verdict]
 
     summary = " · ".join(parts) + f" {verdict_phrase}"
+    news_section = _top_news_html(news_brief, n=3)
 
     st.markdown(
         f"""<div style="background:#1e3a5f1f; border-left:2px solid #60a5fa;
@@ -579,6 +625,7 @@ def render_plain_summary(decision, result) -> None:
         <div style="font-size:10px; letter-spacing:1.5px; text-transform:uppercase;
                     opacity:0.6; margin-bottom:4px;">한줄 해석</div>
         <div style="font-size:14px; line-height:1.6;">{summary}</div>
+        {news_section}
         </div>""",
         unsafe_allow_html=True,
     )
@@ -1306,7 +1353,7 @@ def main() -> None:
     render_easy_summary(decision, multi, news_brief)
 
     render_verdict_block(decision, inputs["perp_mark"], inputs["spot_price"])
-    render_plain_summary(decision, result)
+    render_plain_summary(decision, result, news_brief)
     render_threshold_guide()
     render_timeframes(multi)
     render_action_guide(multi)
