@@ -47,13 +47,21 @@ KEYWORD_WHITELIST: tuple[str, ...] = (
 )
 
 # Try newer models first, fall back to older if not available on the user's tier.
-# As of 2026, Google has rotated through several names; pinning a list survives churn.
+# As of 2026 Google rotates names rapidly; the auto-tracking aliases (`-latest`)
+# are usually the safest. We probe through specific versions too in case the
+# alias isn't available for a particular project.
 MODEL_FALLBACK_CHAIN: tuple[str, ...] = (
+    # Current GA series
+    "gemini-flash-latest",
     "gemini-2.5-flash",
+    "gemini-2.5-flash-preview-05-20",
+    # Older but often still enabled
     "gemini-2.0-flash",
     "gemini-2.0-flash-001",
+    "gemini-2.0-flash-exp",
+    # Last-resort 1.5 series (may be sunset)
+    "gemini-1.5-flash-002",
     "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
 )
 DEFAULT_MODEL = MODEL_FALLBACK_CHAIN[0]
 
@@ -224,8 +232,26 @@ def score_with_gemini(
         parsed["_model"] = candidate
         break
     else:
+        # Final fallback: query ListModels so the user sees what their key can
+        # actually call, instead of guessing at names.
+        available_hint = ""
+        try:
+            available = []
+            for m in client.models.list():
+                name = getattr(m, "name", "") or ""
+                # Only models that support generateContent are useful here.
+                actions = getattr(m, "supported_actions", None) or \
+                          getattr(m, "supported_generation_methods", None) or []
+                if "generateContent" in actions or not actions:
+                    available.append(name.replace("models/", ""))
+                if len(available) >= 12:
+                    break
+            if available:
+                available_hint = f" 이 키로 사용 가능한 모델 (상위 12): {', '.join(available)}"
+        except Exception as list_e:
+            available_hint = f" (ListModels도 실패: {list_e})"
         return {"events": [], "macro_calendar": [],
-                "_error": f"모든 모델 후보 실패. last={last_error}"}
+                "_error": f"모든 모델 후보 실패. last={last_error}.{available_hint}"}
 
     if not isinstance(parsed, dict) or "events" not in parsed:
         return {"events": [], "macro_calendar": [],
