@@ -857,6 +857,296 @@ def _render_section_conclusion(text: str) -> None:
     )
 
 
+def _compute_scalp_plan(
+    multi,
+    current_price: float,
+    sl_pct: float = 0.003,
+    tp_pct: float = 0.006,
+) -> dict:
+    """Compute concrete scalping trade plan from ST decision.
+
+    Returns dict with direction / tier / entry / SL / TP / sizing / reasoning.
+    """
+    score = multi.st.score
+    conf = multi.st.confidence
+    abs_score = abs(score)
+
+    # Tier classification (matches plan file table).
+    if abs_score < 0.05 or conf < 0.25:
+        tier = "hold"
+        direction = "HOLD"
+    elif abs_score < 0.15:
+        tier = "weak"
+        direction = "LONG" if score > 0 else "SHORT"
+    elif abs_score < 0.30:
+        tier = "medium"
+        direction = "LONG" if score > 0 else "SHORT"
+    else:
+        tier = "strong"
+        direction = "LONG" if score > 0 else "SHORT"
+
+    # Sizing & leverage by tier.
+    sizing = {
+        "strong": (0.05, "2~3x", "강한"),
+        "medium": (0.03, "1~2x", "우호"),
+        "weak":   (0.02, "1x",   "약한"),
+        "hold":   (0.0,  "—",    "보류"),
+    }
+    position_pct, leverage, tier_label = sizing[tier]
+
+    # Approximate worst-case loss = pos_pct × sl_pct × leverage.
+    # For "2~3x" we use midpoint 2.5; for "1~2x" we use 1.5.
+    lev_midpoint = {"strong": 2.5, "medium": 1.5, "weak": 1.0, "hold": 0.0}[tier]
+    max_loss_pct = position_pct * sl_pct * lev_midpoint
+
+    # Entry / SL / TP prices.
+    if direction == "LONG":
+        entry_price = current_price
+        sl_price = current_price * (1 - sl_pct)
+        tp_price = current_price * (1 + tp_pct)
+    elif direction == "SHORT":
+        entry_price = current_price
+        sl_price = current_price * (1 + sl_pct)
+        tp_price = current_price * (1 - tp_pct)
+    else:
+        entry_price = sl_price = tp_price = current_price
+
+    rr_ratio = tp_pct / sl_pct if sl_pct > 0 else 0.0
+
+    # Top supporting (pros) and opposing (cons) signals from ST result.
+    contribs = multi.st_result.contributions
+    pros = sorted(
+        (c for c in contribs if c["contribution"] > 0.005),
+        key=lambda c: c["contribution"], reverse=True,
+    )[:3]
+    cons = sorted(
+        (c for c in contribs if c["contribution"] < -0.005),
+        key=lambda c: c["contribution"],
+    )[:3]
+
+    # Reasoning sentence.
+    if direction == "LONG":
+        if tier == "strong":
+            reasoning = "단기 신호가 강하게 매수 쪽으로 정렬 — 작은 사이즈로 즉시 진입 가능."
+        elif tier == "medium":
+            reasoning = "단기 매수 편향이지만 신호 강도 보통 — 작은 사이즈, 좁은 손절 권장."
+        else:
+            reasoning = "단기 약 매수 — 진입 선택사항, 큰 베팅 자제."
+    elif direction == "SHORT":
+        if tier == "strong":
+            reasoning = "단기 신호가 강하게 매도 쪽으로 정렬 — 숏 또는 매도 진입 가능."
+        elif tier == "medium":
+            reasoning = "단기 매도 편향이지만 신호 강도 보통 — 작은 사이즈, 좁은 손절 권장."
+        else:
+            reasoning = "단기 약 매도 — 진입 선택사항, 큰 베팅 자제."
+    else:
+        if conf < 0.25:
+            reasoning = "신뢰도 너무 낮음 — 데이터가 부족하니 진입 X."
+        else:
+            reasoning = "강한 매수·매도 신호 모두 부족 — 균형 상태, 명확한 신호 대기."
+
+    return {
+        "direction": direction,
+        "tier": tier,
+        "tier_label": tier_label,
+        "score": score,
+        "confidence": conf,
+        "entry_price": entry_price,
+        "sl_price": sl_price,
+        "tp_price": tp_price,
+        "sl_pct": sl_pct,
+        "tp_pct": tp_pct,
+        "rr_ratio": rr_ratio,
+        "position_pct": position_pct,
+        "leverage": leverage,
+        "max_loss_pct": max_loss_pct,
+        "pros": pros,
+        "cons": cons,
+        "reasoning": reasoning,
+    }
+
+
+def render_scalp_decision_panel(multi, current_price: float) -> None:
+    """Always-visible scalping decision card (LONG/SHORT/HOLD with full plan)."""
+    plan = _compute_scalp_plan(multi, current_price)
+    direction = plan["direction"]
+    tier = plan["tier"]
+    color = VERDICT_COLORS["LONG"] if direction == "LONG" else \
+            VERDICT_COLORS["SHORT"] if direction == "SHORT" else \
+            VERDICT_COLORS["NEUTRAL"]
+
+    # Direction label
+    if direction == "HOLD":
+        direction_label = "진입 보류"
+        marker = "—"
+    elif direction == "LONG":
+        direction_label = f"{plan['tier_label']} 매수 (LONG)"
+        marker = "▲▲" if tier == "strong" else "▲"
+    else:
+        direction_label = f"{plan['tier_label']} 매도 (SHORT)"
+        marker = "▼▼" if tier == "strong" else "▼"
+
+    # Build HTML pieces conditionally on direction
+    if direction == "HOLD":
+        body_html = f"""
+            <div style="font-size:14px; line-height:1.7; opacity:0.85;">
+                {plan['reasoning']}
+            </div>
+            <div style="margin-top:12px; padding-top:10px;
+                        border-top:1px solid #ffffff10; font-size:12px;
+                        opacity:0.6;">
+                현재 ST score <b>{plan['score']:+.3f}</b> ·
+                conf <b>{plan['confidence']:.2f}</b>
+            </div>
+        """
+    else:
+        # Pros HTML
+        pros_html = ""
+        for p in plan["pros"]:
+            kr = SIGNAL_NAME_KR.get(p["name"], p["name"])
+            pros_html += (
+                f'<div style="margin:3px 0; font-size:12px;">'
+                f'<span style="color:#22c55e;">▲</span> '
+                f'<b>{kr}</b> '
+                f'<span style="opacity:0.65;">{p["contribution"]:+.3f}</span>'
+                f'</div>'
+            )
+        if not pros_html:
+            pros_html = '<div style="opacity:0.5; font-size:12px;">없음</div>'
+
+        # Cons HTML
+        cons_html = ""
+        for c in plan["cons"]:
+            kr = SIGNAL_NAME_KR.get(c["name"], c["name"])
+            cons_html += (
+                f'<div style="margin:3px 0; font-size:12px;">'
+                f'<span style="color:#ef4444;">▼</span> '
+                f'<b>{kr}</b> '
+                f'<span style="opacity:0.65;">{c["contribution"]:+.3f}</span>'
+                f'</div>'
+            )
+        if not cons_html:
+            cons_html = '<div style="opacity:0.5; font-size:12px;">없음</div>'
+
+        body_html = f"""
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;
+                        margin-top:6px;">
+                <div>
+                    <div style="font-size:10px; letter-spacing:1.5px;
+                                text-transform:uppercase; opacity:0.6;
+                                margin-bottom:6px;">가격 계획</div>
+                    <table style="width:100%; font-size:13px; border-collapse:collapse;">
+                        <tr>
+                            <td style="padding:4px 0; opacity:0.7;">진입가</td>
+                            <td style="padding:4px 0; text-align:right;">
+                                <b>${plan['entry_price']:,.2f}</b>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:4px 0; opacity:0.7;">손절가</td>
+                            <td style="padding:4px 0; text-align:right; color:#ef4444;">
+                                ${plan['sl_price']:,.2f}
+                                <span style="opacity:0.55; font-size:11px;">
+                                    ({plan['sl_pct']*100:+.2f}%)
+                                </span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:4px 0; opacity:0.7;">익절가</td>
+                            <td style="padding:4px 0; text-align:right; color:#22c55e;">
+                                ${plan['tp_price']:,.2f}
+                                <span style="opacity:0.55; font-size:11px;">
+                                    ({plan['tp_pct']*100:+.2f}%)
+                                </span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:4px 0; opacity:0.7;">R:R</td>
+                            <td style="padding:4px 0; text-align:right;">
+                                1:{plan['rr_ratio']:.1f}
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+                <div>
+                    <div style="font-size:10px; letter-spacing:1.5px;
+                                text-transform:uppercase; opacity:0.6;
+                                margin-bottom:6px;">포지션 사이징</div>
+                    <table style="width:100%; font-size:13px; border-collapse:collapse;">
+                        <tr>
+                            <td style="padding:4px 0; opacity:0.7;">자본 노출</td>
+                            <td style="padding:4px 0; text-align:right;">
+                                <b>{plan['position_pct']*100:.1f}%</b>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:4px 0; opacity:0.7;">레버리지</td>
+                            <td style="padding:4px 0; text-align:right;">
+                                <b>{plan['leverage']}</b>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding:4px 0; opacity:0.7;">최악 손실</td>
+                            <td style="padding:4px 0; text-align:right; color:#ef4444;">
+                                자본의 <b>{plan['max_loss_pct']*100:.3f}%</b>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+            <div style="margin-top:14px; padding-top:10px;
+                        border-top:1px solid #ffffff10;">
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:18px;">
+                    <div>
+                        <div style="font-size:10px; letter-spacing:1.5px;
+                                    text-transform:uppercase; opacity:0.6;
+                                    margin-bottom:4px;">매수 근거</div>
+                        {pros_html}
+                    </div>
+                    <div>
+                        <div style="font-size:10px; letter-spacing:1.5px;
+                                    text-transform:uppercase; opacity:0.6;
+                                    margin-bottom:4px;">매도 근거</div>
+                        {cons_html}
+                    </div>
+                </div>
+            </div>
+            <div style="margin-top:12px; font-size:12px; opacity:0.75;
+                        font-style:italic;">
+                {plan['reasoning']}
+            </div>
+        """
+
+    st.markdown(
+        f"""<div style="background: linear-gradient(135deg, {color}1a, #0f172a33);
+        border:2px solid {color}88; border-radius:10px;
+        padding:18px 22px; margin:10px 0;">
+            <div style="display:flex; justify-content:space-between;
+                        align-items:flex-start; margin-bottom:10px;">
+                <div>
+                    <div style="font-size:11px; letter-spacing:2px;
+                                text-transform:uppercase; opacity:0.65;">
+                        단타 의사결정
+                    </div>
+                    <div style="font-size:24px; font-weight:700; color:{color};
+                                margin-top:4px;">
+                        <span style="margin-right:8px;">{marker}</span>
+                        {direction_label}
+                    </div>
+                </div>
+                <div style="font-size:11px; opacity:0.55; text-align:right;
+                            line-height:1.5;">
+                    ST score <b>{plan['score']:+.3f}</b><br>
+                    conf <b>{plan['confidence']:.2f}</b><br>
+                    tier <b>{tier}</b>
+                </div>
+            </div>
+            {body_html}
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
 def render_scalp_alert(multi, threshold: float = 0.30) -> None:
     """Big banner at top when ST score crosses strong-signal threshold."""
     st_score = multi.st.score
@@ -1592,6 +1882,8 @@ def main() -> None:
     # Scalp threshold alert (only if scalp_mode and ST score crosses ±0.30).
     if scalp_mode:
         render_scalp_alert(multi)
+        # Always-visible scalping decision card with full trade plan.
+        render_scalp_decision_panel(multi, current_price=inputs["perp_mark"])
 
     # Top-of-page plain conclusion (largest box, sets the frame).
     render_easy_summary(decision, multi, news_brief)
