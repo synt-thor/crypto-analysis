@@ -383,20 +383,47 @@ def fetch_live_news_brief() -> dict | None:
         return None
 
 
+_RES_TO_BARS_PER_HOUR = {"1": 60, "5": 12, "15": 4, "60": 1}
+_RES_TO_COINBASE_GRAN = {"1": 60, "5": 300, "15": 900, "60": 3600}
+
+
 @st.cache_data(ttl=3600, show_spinner="과거 데이터 백필 + 백테스트 실행 중…")
-def run_backtest_live(days: int, hold_hours: int):
+def run_backtest_live(
+    days: int,
+    hold_hours: float,
+    resolution: str = "60",
+    fee_bps: float = 5.0,
+    slippage_bps: float = 5.0,
+    stop_loss_pct: float | None = None,
+    take_profit_pct: float | None = None,
+):
     now = datetime.now(tz=timezone.utc)
     start = now - timedelta(days=days)
     start_ms = int(start.timestamp() * 1000)
     end_ms = int(now.timestamp() * 1000)
 
-    perp = deribit.tradingview_chart_data(PERPETUAL, start_ms, end_ms, resolution="60")
+    bars_per_hour = _RES_TO_BARS_PER_HOUR.get(resolution, 1)
+
+    # Use chunked fetch for fine resolutions (1m / 5m over many days).
+    if resolution in ("1", "5") and days > 3:
+        perp = deribit.tradingview_chart_data_chunked(
+            PERPETUAL, start_ms, end_ms, resolution=resolution
+        )
+    else:
+        perp = deribit.tradingview_chart_data(
+            PERPETUAL, start_ms, end_ms, resolution=resolution
+        )
+
     funding = deribit.funding_rate_history(PERPETUAL, start_ms, end_ms)
     if not funding.empty:
         funding["funding_rate"] = funding.get("interest_1h", funding.get("funding_rate"))
-    # Coinbase candles instead of Binance (Binance blocks US datacenter IPs).
-    spot = exchanges.coinbase_candles_range("BTC-USD", granularity=3600,
-                                            start_ms=start_ms, end_ms=end_ms)
+
+    # Coinbase candles at matching granularity (fallback to 1h if granularity
+    # too fine — Coinbase only supports 60/300/900/3600/21600/86400).
+    granularity = _RES_TO_COINBASE_GRAN.get(resolution, 3600)
+    spot = exchanges.coinbase_candles_range(
+        "BTC-USD", granularity=granularity, start_ms=start_ms, end_ms=end_ms
+    )
 
     return run_backtest(
         perp_ohlcv=perp.sort_values("ts").reset_index(drop=True),
@@ -404,7 +431,12 @@ def run_backtest_live(days: int, hold_hours: int):
         funding_df=funding.sort_values("ts").reset_index(drop=True),
         ticker_hist=None,
         hold_hours=hold_hours,
-        step_hours=max(2, hold_hours // 2),
+        step_hours=max(1, hold_hours / 2),
+        bars_per_hour=bars_per_hour,
+        fee_bps=fee_bps,
+        slippage_bps=slippage_bps,
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
     )
 
 
@@ -825,6 +857,51 @@ def _render_section_conclusion(text: str) -> None:
     )
 
 
+def render_scalp_alert(multi, threshold: float = 0.30) -> None:
+    """Big banner at top when ST score crosses strong-signal threshold."""
+    st_score = multi.st.score
+    st_verdict = multi.st.verdict
+    st_conf = multi.st.confidence
+
+    if abs(st_score) < threshold or st_conf < 0.25:
+        return  # not strong enough
+
+    if st_score >= threshold:
+        side = "강한 매수 임계 돌파"
+        action = "지금 매수 진입 검토 — 짧은 익절(0.5~1%) + 좁은 손절(0.3%)"
+        color = "#22c55e"
+    else:
+        side = "강한 매도 임계 돌파"
+        action = "지금 매도/숏 진입 검토 — 짧은 익절(0.5~1%) + 좁은 손절(0.3%)"
+        color = "#ef4444"
+
+    st.markdown(
+        f"""<div style="background: {color}26; border:2px solid {color};
+        border-radius:8px; padding:14px 18px; margin:8px 0 16px 0;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <div style="font-size:11px; letter-spacing:2px;
+                                text-transform:uppercase; opacity:0.75;">
+                        단타 알림 · ST 임계
+                    </div>
+                    <div style="font-size:18px; font-weight:700; color:{color};
+                                margin-top:4px;">
+                        {side} ({st_verdict} {st_score:+.3f})
+                    </div>
+                    <div style="font-size:13px; opacity:0.85; margin-top:6px;">
+                        {action}
+                    </div>
+                </div>
+                <div style="font-size:11px; opacity:0.55; text-align:right;">
+                    threshold ±{threshold:.2f}<br>
+                    conf {st_conf:.2f}
+                </div>
+            </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
 def render_easy_summary(decision, multi, news_brief: dict | None) -> None:
     """Top-of-page big-box plain-Korean summary tying everything together."""
     # Headline (overall verdict)
@@ -1148,19 +1225,43 @@ def render_news_editor() -> dict | None:
         return None
 
 
-def render_autorefresh_sidebar() -> int:
+def render_scalp_mode_sidebar() -> bool:
+    """Sidebar toggle for scalping mode — adds 1m refresh option + threshold alert."""
+    st.sidebar.header("거래 모드")
+    is_scalp = st.sidebar.toggle(
+        "단타 모드",
+        value=False,
+        help=(
+            "켜면: 자동 갱신 1분 옵션 활성화, ST 점수 임계(±0.30) 돌파 시 화면 상단 "
+            "알림 배너 표시. 분 단위 의사결정용."
+        ),
+    )
+    if is_scalp:
+        st.sidebar.caption("⚡ 단타 모드 — 1분 갱신 가능, ST 임계 알림 활성")
+    return is_scalp
+
+
+def render_autorefresh_sidebar(scalp_mode: bool = False) -> int:
     """Sidebar control for auto-refresh interval. Returns interval in minutes (0 = off)."""
     st.sidebar.header("자동 갱신")
-    options = [0, 5, 10, 15, 30, 60]
-    labels = {0: "끔 (수동)", 5: "5분", 10: "10분", 15: "15분 (추천)", 30: "30분", 60: "60분"}
+    if scalp_mode:
+        options = [0, 1, 2, 5, 10, 15]
+        labels = {0: "끔 (수동)", 1: "1분 (단타)", 2: "2분", 5: "5분",
+                  10: "10분", 15: "15분"}
+        default_idx = options.index(1)
+    else:
+        options = [0, 5, 10, 15, 30, 60]
+        labels = {0: "끔 (수동)", 5: "5분", 10: "10분", 15: "15분 (추천)",
+                  30: "30분", 60: "60분"}
+        default_idx = options.index(15)
     minutes = st.sidebar.selectbox(
         "갱신 주기",
         options=options,
-        index=options.index(15),
+        index=default_idx,
         format_func=lambda m: labels[m],
         help=(
             "선택한 주기로 페이지가 자동 재실행되어 모든 데이터를 새로고침합니다. "
-            "캐시 TTL과 같은 15분 권장 (뉴스 캐시도 15분이라 정확히 맞물림)."
+            "단타 모드에선 1분 권장 (분봉 단위 진입/청산 판단용)."
         ),
     )
     if minutes > 0:
@@ -1263,52 +1364,190 @@ def render_weight_sidebar() -> dict[str, float]:
     return weights
 
 
-def render_backtest() -> None:
-    st.subheader("백테스트 (live API에서 즉시 다운로드)")
-    with st.expander("과거 데이터로 신호 엔진 검증", expanded=False):
-        c1, c2, c3 = st.columns([2, 2, 1])
-        days = c1.slider("기간 (일)", 7, 90, 30)
-        hold = c2.selectbox("Hold hours", [4, 8, 24], index=1)
-        run = c3.button("▶ 실행", use_container_width=True)
+def render_capital_simulation(result, start_btc: float, start_usd: float) -> None:
+    """Concrete '1 BTC로 시작하면 얼마' panel."""
+    final_mult = (
+        float(result.equity_curve.iloc[-1]) if not result.equity_curve.empty else 1.0
+    )
+    final_btc = start_btc * final_mult
+    final_usd = start_usd * final_mult
+    pct_return = (final_mult - 1.0) * 100
+    color = "#22c55e" if final_mult >= 1.0 else "#ef4444"
+
+    st.markdown(
+        f"""<div style="background: linear-gradient(135deg, #1e3a5f1f, #0f172a33);
+        border:1px solid {color}55; border-radius:8px;
+        padding:18px 22px; margin:12px 0;">
+            <div style="font-size:11px; letter-spacing:2px; text-transform:uppercase;
+                        opacity:0.65; margin-bottom:10px;">자본 시뮬레이션</div>
+            <table style="width:100%; font-size:13px; border-collapse:collapse;">
+                <tr>
+                    <td style="padding:6px 0; opacity:0.7;">시작 자본</td>
+                    <td style="padding:6px 0; text-align:right;">
+                        <b>{start_btc:.4f} BTC</b>
+                        <span style="opacity:0.55;">  ·  ${start_usd:,.0f}</span>
+                    </td>
+                </tr>
+                <tr>
+                    <td style="padding:6px 0; opacity:0.7;">종료 자본</td>
+                    <td style="padding:6px 0; text-align:right; color:{color};">
+                        <b>{final_btc:.4f} BTC</b>
+                        <span style="opacity:0.55;">  ·  ${final_usd:,.0f}</span>
+                    </td>
+                </tr>
+                <tr>
+                    <td style="padding:6px 0; opacity:0.7;">순수익</td>
+                    <td style="padding:6px 0; text-align:right; color:{color}; font-weight:700;">
+                        {pct_return:+.2f}%
+                        &nbsp;<span style="opacity:0.6; font-weight:400;">
+                        ({(final_btc - start_btc):+.4f} BTC)
+                        </span>
+                    </td>
+                </tr>
+                <tr>
+                    <td style="padding:6px 0; opacity:0.7;">최대 낙폭 (MDD)</td>
+                    <td style="padding:6px 0; text-align:right; color:#ef4444;">
+                        {result.max_drawdown * 100:.2f}%
+                    </td>
+                </tr>
+            </table>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def render_backtest(current_spot_usd: float = 77000.0) -> None:
+    st.subheader("백테스트 + 자본 시뮬레이션")
+    with st.expander("과거 데이터로 신호 엔진 검증 + 단타 시뮬", expanded=False):
+        st.caption(
+            "backtestable subset: funding + spot_futures (+ oi if ticker hist 제공). "
+            "옵션·매크로·뉴스는 historical book 부재로 미반영 — 라이브 결정엔 다 들어감."
+        )
+
+        # Row 1: window + resolution + hold
+        c1, c2, c3 = st.columns([1, 1, 1])
+        days = c1.slider("기간 (일)", 1, 90, 30)
+        resolution = c2.selectbox(
+            "해상도",
+            options=["60", "15", "5", "1"],
+            index=0,
+            format_func=lambda r: {"1": "1분", "5": "5분", "15": "15분", "60": "1시간"}[r],
+            help="분봉은 단타 검증용. 1분 + 30일은 4만 봉 → 3~5분 소요.",
+        )
+        hold_hours = c3.number_input(
+            "Hold hours (최대 보유)", 0.25, 48.0, 8.0, step=0.25,
+            help="단타: 0.25~2시간 / 스윙: 4~24시간",
+        )
+
+        # Row 2: SL/TP/fee
+        c4, c5, c6 = st.columns([1, 1, 1])
+        sl_pct = c4.number_input(
+            "Stop-loss (%)", 0.0, 5.0, 0.5, step=0.1,
+            help="0이면 비활성. 0.5%면 진입가 대비 0.5% 역방향 가면 자동 청산",
+        ) / 100.0
+        tp_pct = c5.number_input(
+            "Take-profit (%)", 0.0, 10.0, 1.0, step=0.1,
+            help="0이면 비활성. 1.0%면 진입가 대비 1.0% 정방향 가면 자동 청산",
+        ) / 100.0
+        fee_bps = c6.number_input(
+            "수수료+슬리피지 (bps)", 0.0, 50.0, 10.0, step=1.0,
+            help="round-trip 비용 = 2 × 이 값. Deribit perp taker 5bp 권장.",
+        )
+
+        # Row 3: capital + run
+        c7, c8 = st.columns([2, 1])
+        start_btc = c7.number_input(
+            "시작 자본 (BTC)", 0.01, 100.0, 1.0, step=0.1,
+            help="1 BTC 기준 가정. 결과는 비례 환산.",
+        )
+        run = c8.button("실행", use_container_width=True)
+
         if not run:
-            st.caption("백테스트는 funding + spot_futures 신호의 서브셋만 사용합니다 — 옵션·매크로·뉴스 등은 미반영.")
             return
 
-        result = run_backtest_live(days=days, hold_hours=hold)
+        # None means disabled
+        sl_arg = sl_pct if sl_pct > 0 else None
+        tp_arg = tp_pct if tp_pct > 0 else None
+        fee_arg = fee_bps / 2.0  # split equally between fee & slippage
+        slip_arg = fee_bps / 2.0
+
+        result = run_backtest_live(
+            days=days,
+            hold_hours=hold_hours,
+            resolution=resolution,
+            fee_bps=fee_arg,
+            slippage_bps=slip_arg,
+            stop_loss_pct=sl_arg,
+            take_profit_pct=tp_arg,
+        )
         if result.trades.empty:
-            st.warning("거래가 0건. 데이터가 부족하거나 모든 판정이 NEUTRAL.")
+            st.warning("거래가 0건. 데이터 부족이거나 모든 판정이 NEUTRAL.")
             return
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("거래 수", len(result.trades))
-        m2.metric("Hit rate", f"{result.hit_rate:.2%}" if pd.notna(result.hit_rate) else "—")
-        m3.metric("평균 PnL", f"{result.avg_fwd_return:+.3%}" if pd.notna(result.avg_fwd_return) else "—")
-        m4.metric("Sharpe", f"{result.sharpe:.2f}" if pd.notna(result.sharpe) else "—")
+        # ─── Capital simulation panel (most prominent)
+        render_capital_simulation(result, start_btc=start_btc,
+                                  start_usd=start_btc * current_spot_usd)
 
+        # ─── Aggregate metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("거래 수", len(result.trades),
+                  help=f"활성 {result.win_count + result.loss_count}건 + NEUTRAL {result.neutral_count}건")
+        m2.metric("Hit rate",
+                  f"{result.hit_rate:.2%}" if pd.notna(result.hit_rate) else "—")
+        m3.metric("평균 PnL/거래",
+                  f"{result.avg_fwd_return:+.3%}" if pd.notna(result.avg_fwd_return) else "—")
+        m4.metric("Sharpe (연환산)",
+                  f"{result.sharpe:.2f}" if pd.notna(result.sharpe) else "—")
+
+        # ─── Exit-reason breakdown
+        e1, e2, e3 = st.columns(3)
+        e1.metric("Stop-loss 발동", result.sl_hits)
+        e2.metric("Take-profit 발동", result.tp_hits)
+        e3.metric("Max-hold 청산", result.timeout_exits)
+
+        # ─── Equity curve
         if not result.equity_curve.empty:
             fig = go.Figure()
+            curve_color = "#22c55e" if result.total_return >= 0 else "#ef4444"
             fig.add_trace(go.Scatter(
                 x=result.equity_curve.index,
-                y=result.equity_curve.values,
+                y=result.equity_curve.values * start_btc,
                 mode="lines",
-                name="equity",
-                line=dict(color="#22c55e", width=2),
+                name="자본 (BTC)",
+                line=dict(color=curve_color, width=2),
             ))
             fig.update_layout(
-                title="에쿼티 커브 (1.0 = 시작)",
-                yaxis_title="multiple",
+                title=f"자본 곡선  ·  시작 {start_btc:.2f} BTC → 종료 "
+                      f"{start_btc * float(result.equity_curve.iloc[-1]):.4f} BTC",
+                yaxis_title="BTC",
                 height=320,
-                margin=dict(l=20, r=20, t=40, b=30),
+                margin=dict(l=20, r=20, t=50, b=30),
                 template="plotly_dark",
             )
             st.plotly_chart(fig, use_container_width=True)
 
-        st.dataframe(
-            result.trades["verdict"].value_counts().reset_index().rename(
-                columns={"verdict": "판정", "count": "건수"}
-            ),
-            hide_index=True,
-        )
+        # ─── Trade-direction breakdown
+        with st.expander("거래 분포 / 샘플", expanded=False):
+            st.dataframe(
+                result.trades["verdict"].value_counts().reset_index().rename(
+                    columns={"verdict": "판정", "count": "건수"}
+                ),
+                hide_index=True,
+            )
+            if "exit_reason" in result.trades.columns:
+                st.dataframe(
+                    result.trades["exit_reason"].value_counts().reset_index().rename(
+                        columns={"exit_reason": "청산 사유", "count": "건수"}
+                    ),
+                    hide_index=True,
+                )
+            st.caption("최근 거래 10건:")
+            st.dataframe(
+                result.trades.tail(10)[
+                    ["ts", "verdict", "score", "pnl", "exit_reason", "bars_held"]
+                ],
+                hide_index=True,
+            )
 
 
 def render_footer() -> None:
@@ -1334,7 +1573,8 @@ def main() -> None:
         layout="wide",
     )
 
-    render_autorefresh_sidebar()
+    scalp_mode = render_scalp_mode_sidebar()
+    render_autorefresh_sidebar(scalp_mode=scalp_mode)
     weights = render_weight_sidebar()
 
     inputs = fetch_market_inputs()
@@ -1348,6 +1588,10 @@ def main() -> None:
     result = fuse(signals, weights=weights)
     decision = decide(result)
     multi = decide_multi(signals)
+
+    # Scalp threshold alert (only if scalp_mode and ST score crosses ±0.30).
+    if scalp_mode:
+        render_scalp_alert(multi)
 
     # Top-of-page plain conclusion (largest box, sets the frame).
     render_easy_summary(decision, multi, news_brief)
@@ -1368,7 +1612,7 @@ def main() -> None:
         render_signal_table(result)
         _render_section_conclusion(_conclude_signal_table_text(result))
 
-    render_backtest()
+    render_backtest(current_spot_usd=inputs["spot_price"] or 77000.0)
     render_footer()
 
 

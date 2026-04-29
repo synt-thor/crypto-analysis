@@ -83,6 +83,40 @@ def tradingview_chart_data(
     return df
 
 
+def tradingview_chart_data_chunked(
+    instrument_name: str,
+    start_ms: int,
+    end_ms: int,
+    resolution: str = "60",
+    chunk_bars: int = 4000,
+) -> pd.DataFrame:
+    """Chunked OHLCV fetch for arbitrary time windows + fine resolutions.
+
+    Deribit's tradingview endpoint returns up to ~5000 bars per call. For
+    1-minute backtests over weeks this isn't enough — we walk forward in
+    chunks of `chunk_bars` and concatenate.
+    """
+    res_to_minutes = {
+        "1": 1, "3": 3, "5": 5, "10": 10, "15": 15, "30": 30,
+        "60": 60, "120": 120, "180": 180, "360": 360, "720": 720, "1D": 1440,
+    }
+    minutes_per_bar = res_to_minutes.get(resolution, 60)
+    chunk_ms = chunk_bars * minutes_per_bar * 60 * 1000
+
+    cursor = start_ms
+    frames: list[pd.DataFrame] = []
+    while cursor < end_ms:
+        chunk_end = min(cursor + chunk_ms, end_ms)
+        df = tradingview_chart_data(instrument_name, cursor, chunk_end, resolution)
+        if not df.empty:
+            frames.append(df)
+        cursor = chunk_end
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    return out.drop_duplicates(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+
+
 def historical_volatility(currency: str = "BTC") -> pd.DataFrame:
     result = _call("get_historical_volatility", {"currency": currency})
     df = pd.DataFrame(result, columns=["timestamp_ms", "rv"])
