@@ -51,17 +51,19 @@ KEYWORD_WHITELIST: tuple[str, ...] = (
 # are usually the safest. We probe through specific versions too in case the
 # alias isn't available for a particular project.
 MODEL_FALLBACK_CHAIN: tuple[str, ...] = (
-    # Current GA series
-    "gemini-flash-latest",
+    # Stable models with high free-tier daily quotas (~1500/day) — try first.
     "gemini-2.5-flash",
     "gemini-2.5-flash-preview-05-20",
-    # Older but often still enabled
     "gemini-2.0-flash",
     "gemini-2.0-flash-001",
     "gemini-2.0-flash-exp",
-    # Last-resort 1.5 series (may be sunset)
+    # 1.5 series fallback (may be sunset).
     "gemini-1.5-flash-002",
     "gemini-1.5-flash",
+    # `gemini-flash-latest` alias is LAST — it currently points at gemini-3-flash
+    # whose free-tier quota is only 20/day (2026-05). Use only when older
+    # models all unavailable for the project.
+    "gemini-flash-latest",
 )
 DEFAULT_MODEL = MODEL_FALLBACK_CHAIN[0]
 
@@ -210,12 +212,18 @@ def score_with_gemini(
         except Exception as e:
             err_str = f"{type(e).__name__}: {e}"
             last_error = f"[{candidate}] {err_str}"
-            # Only retry next model on availability errors. Auth / quota errors
-            # are global and won't be helped by trying other models.
             lower = err_str.lower()
+            # Per-model availability errors → try next model.
             if any(tok in lower for tok in ("not found", "not supported", "404", "unavailable")):
                 logger.info("Model %s unavailable, trying next: %s", candidate, err_str)
                 continue
+            # Per-model daily quota exhaustion (e.g. gemini-3-flash 20/day) →
+            # try next model in chain. Each model has its own daily quota.
+            if "429" in lower or "resource_exhausted" in lower or "quota" in lower:
+                logger.info("Model %s quota exhausted, trying next: %s",
+                            candidate, err_str)
+                continue
+            # Auth / invalid-argument / parse errors are global → bail.
             return {"events": [], "macro_calendar": [], "_error": last_error,
                     "_model_tried": candidate}
 

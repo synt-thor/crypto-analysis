@@ -369,7 +369,7 @@ def _get_gemini_api_key() -> str | None:
     return os.getenv("GEMINI_API_KEY")
 
 
-@st.cache_data(ttl=900, show_spinner="실시간 뉴스 페치 + Gemini 점수화…")
+@st.cache_data(ttl=1800, show_spinner="실시간 뉴스 페치 + Gemini 점수화…")
 def fetch_live_news_brief() -> dict | None:
     """Returns auto-built news brief or None to fall back to disk baseline."""
     api_key = _get_gemini_api_key()
